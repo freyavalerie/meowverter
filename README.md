@@ -1,16 +1,16 @@
-# Catverter
+# Meowverter
 
 A little FFmpeg app that stays out of your way. Pure black, rainbow, and quick.
 Convert videos, pull the audio out, make GIFs, or grab a clip off YouTube and a
 bunch of other sites. It leans on your GPU (NVENC) to encode, so things move fast
 and your CPU stays free.
 
-![Catverter converting a video](docs/screenshot.png)
+![Meowverter converting a video](docs/screenshot.png)
 
 ## Download
 
-Head to the [releases page](https://github.com/freyavalerie/catverter/releases/latest),
-grab `Catverter_x.x.x_x64-setup.exe`, and run it. Windows 10 and 11, 64-bit.
+Head to the [releases page](https://github.com/freyavalerie/meowverter/releases/latest),
+grab `Meowverter_x.x.x_x64-setup.exe`, and run it. Windows 10 and 11, 64-bit.
 
 The first time you run it, Windows might throw up a SmartScreen warning about an
 unknown publisher. That's only because I haven't bought a signing certificate.
@@ -31,7 +31,7 @@ to set up.
 - Drop a whole folder in at once, set your options once, and let it work through
   the queue
 - Optionally send the original to the Recycle Bin and keep a tidy
-  `name_Catverter.mp4`
+  `name_Meowverter.mp4`
 - One click gives you a quality score so you can see how close the result looks to
   the original
 - Updates itself from inside the app

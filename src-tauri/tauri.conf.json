@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Catverter",
-  "version": "0.1.0",
-  "identifier": "com.freyavalerie.catverter",
+  "productName": "Meowverter",
+  "version": "0.1.1",
+  "identifier": "com.freyavalerie.meowverter",
   "build": {
     "frontendDist": "../ui"
   },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Catverter",
+        "title": "Meowverter",
         "width": 1120,
         "height": 780,
         "minWidth": 760,
@@ -49,7 +49,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM2OEI0Q0E1RUZDRThDNzcKUldSM2pNN3ZwVXlMTmxld1czUGNnVmZYdmpYVmFoTys2RnlpeUtZYjNaNVdOOGdzL3BJaGUzcjUK",
       "endpoints": [
-        "https://github.com/freyavalerie/catverter/releases/latest/download/latest.json"
+        "https://github.com/freyavalerie/meowverter/releases/latest/download/latest.json"
       ]
     }
   }

@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Core capabilities for Catverter's main window.","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-set-size","core:window:allow-set-min-size","notification:default","updater:default"]}}
+{"default":{"identifier":"default","description":"Core capabilities for Meowverter's main window.","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-set-size","core:window:allow-set-min-size","notification:default","updater:default"]}}

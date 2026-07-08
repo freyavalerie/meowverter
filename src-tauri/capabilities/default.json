@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Core capabilities for Catverter's main window.",
+  "description": "Core capabilities for Meowverter's main window.",
   "windows": ["main"],
   "permissions": [
     "core:default",

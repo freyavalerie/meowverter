@@ -1,4 +1,4 @@
-"""Generate Catverter app icons: OLED-black rounded tile + neon RGB gradient play mark."""
+"""Generate Meowverter app icons: OLED-black rounded tile + neon RGB gradient play mark."""
 import math
 from PIL import Image, ImageDraw, ImageFilter
 

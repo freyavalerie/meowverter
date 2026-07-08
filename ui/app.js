@@ -1,5 +1,5 @@
 // ============================================================
-//  Catverter UI logic
+//  Meowverter UI logic
 //  Works against the Tauri backend, or a mock layer in a plain
 //  browser so the design can be previewed without compiling.
 // ============================================================
@@ -77,7 +77,7 @@ async function mockInvoke(cmd, args) {
       await new Promise((r) => setTimeout(r, 700));
       return 92.4;
     case "check_app_update":
-      return { available: true, version: "0.2.0", notes: "• Instant file drops\n• Keeps the _Catverter name", current: "0.1.0" };
+      return { available: true, version: "0.2.0", notes: "• Instant file drops\n• Keeps the _Meowverter name", current: "0.1.0" };
     case "install_app_update":
       for (let p = 0; p <= 100; p += 25) { mockEmit("app-update", { stage: "progress", percent: p }); await new Promise((r) => setTimeout(r, 120)); }
       return;
@@ -205,8 +205,8 @@ const state = {
   batch: false,
   queue: [],
   ytInfoFailed: false,
-  deleteOriginal: localStorage.getItem("catverter_delorig") === "1",
-  batchOutDir: localStorage.getItem("catverter_batchoutdir") || "", // "" = same folder as each file
+  deleteOriginal: localStorage.getItem("meowverter_delorig") === "1",
+  batchOutDir: localStorage.getItem("meowverter_batchoutdir") || "", // "" = same folder as each file
   mode: "video",
   resolution: "source",
   format: "mp4_h265",
@@ -290,7 +290,7 @@ async function checkAppUpdate() {
 $("appUpdatePill").addEventListener("click", async () => {
   const pill = $("appUpdatePill");
   if (appUpdating) return;
-  if (!confirm("Update Catverter now?\n\nIt'll download, install, and reopen automatically.")) return;
+  if (!confirm("Update Meowverter now?\n\nIt'll download, install, and reopen automatically.")) return;
   appUpdating = true;
   pill.classList.add("busy");
   $("appUpdateText").textContent = "Updating… 0%";
@@ -646,7 +646,7 @@ function currentExt() {
   if (state.mode === "gif") return "gif";
   return { mp4_h264: "mp4", mp4_h265: "mp4", webm: "webm", mkv: "mkv" }[state.format] || "mp4";
 }
-let lastOutDir = localStorage.getItem("catverter_outdir") || "";
+let lastOutDir = localStorage.getItem("meowverter_outdir") || "";
 function recomputeOutput() {
   if (!state.input || state.userOutput) {
     updateOutLabel();
@@ -655,7 +655,7 @@ function recomputeOutput() {
   const { dir, base, sep } = splitPath(state.input);
   // delete-original mode always saves next to the original (it replaces it)
   const outDir = state.deleteOriginal ? dir : (lastOutDir || dir);
-  state.output = `${outDir}${sep}${base}_Catverter.${currentExt()}`;
+  state.output = `${outDir}${sep}${base}_Meowverter.${currentExt()}`;
   updateOutLabel();
 }
 function updateOutLabel() {
@@ -667,11 +667,11 @@ function updateOutLabel() {
 $("changeOut").addEventListener("click", async () => {
   const { base } = splitPath(state.input || "output");
   const ext = currentExt();
-  const chosen = await invoke("pick_output", { defaultName: `${base}_Catverter.${ext}`, ext });
+  const chosen = await invoke("pick_output", { defaultName: `${base}_Meowverter.${ext}`, ext });
   if (chosen) {
     state.output = chosen; state.userOutput = true; updateOutLabel();
     lastOutDir = splitPath(chosen).dir;          // remember this folder for next time
-    localStorage.setItem("catverter_outdir", lastOutDir);
+    localStorage.setItem("meowverter_outdir", lastOutDir);
   }
 });
 
@@ -1096,7 +1096,7 @@ function buildBatchOpts(f) {
   }
   return {
     input: f.path,
-    output: `${outDir}${joinSep}${base}_Catverter.${currentExt()}`,
+    output: `${outDir}${joinSep}${base}_Meowverter.${currentExt()}`,
     mode: state.mode,
     resolution: state.resolution,
     format: state.format,
@@ -1148,7 +1148,7 @@ async function runBatch() {
   renderBatchList();
   updateConvertLabel();
   const done = state.queue.filter((f) => f.status === "done").length;
-  if (done > 0) invoke("notify_done", { title: "Catverter", body: `${done} of ${state.queue.length} files converted` });
+  if (done > 0) invoke("notify_done", { title: "Meowverter", body: `${done} of ${state.queue.length} files converted` });
 }
 // append files to the queue (dedupes; safe to call mid-run - the run loop
 // re-checks queue length each iteration, so added files get converted too)
@@ -1349,13 +1349,13 @@ $("batchOutChange").addEventListener("click", async () => {
   const chosen = await invoke("pick_folder");
   if (chosen) {
     state.batchOutDir = chosen;
-    localStorage.setItem("catverter_batchoutdir", chosen);
+    localStorage.setItem("meowverter_batchoutdir", chosen);
     updateBatchOutLabel();
   }
 });
 $("batchOutReset").addEventListener("click", () => {
   state.batchOutDir = "";
-  localStorage.setItem("catverter_batchoutdir", "");
+  localStorage.setItem("meowverter_batchoutdir", "");
   updateBatchOutLabel();
 });
 
@@ -1368,7 +1368,7 @@ function syncDelOrig() {
 }
 $("delOrigBtn").addEventListener("click", () => {
   state.deleteOriginal = !state.deleteOriginal;
-  localStorage.setItem("catverter_delorig", state.deleteOriginal ? "1" : "0");
+  localStorage.setItem("meowverter_delorig", state.deleteOriginal ? "1" : "0");
   syncDelOrig();
 });
 syncDelOrig();
@@ -1386,6 +1386,6 @@ updateControlsVisibility();
 checkFfmpeg();
 // re-check for an ffmpeg update every 6 hours while the app stays open
 setInterval(checkFfmpegUpdate, 6 * 60 * 60 * 1000);
-// check for a new Catverter version on launch, then every 6 hours
+// check for a new Meowverter version on launch, then every 6 hours
 checkAppUpdate();
 setInterval(checkAppUpdate, 6 * 60 * 60 * 1000);

@@ -1,5 +1,5 @@
 <#
-  Catverter release - one command to ship an update.
+  Meowverter release - one command to ship an update.
 
   What it does:
     1. (optional) bumps the version in tauri.conf.json + Cargo.toml
@@ -7,19 +7,19 @@
     3. writes latest.json (the manifest the app checks for updates)
     4. publishes a GitHub Release with the installer, .sig, and latest.json
 
-  Usage (from the Catverter folder):
+  Usage (from the Meowverter folder):
     powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 0.2.0 -Notes "Faster drops, bug fixes"
     powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Notes "Small fixes"   # keep current version
 
   Requirements:
     - gh CLI logged in as the account that owns the repo (freyavalerie)
-    - the signing key at  %USERPROFILE%\.catverter\updater.key
+    - the signing key at  %USERPROFILE%\.meowverter\updater.key
     - a git remote 'origin' pointing at the GitHub repo
 #>
 param(
   [string]$Version = "",
   [string]$Notes   = "",
-  [string]$Repo    = "freyavalerie/catverter"
+  [string]$Repo    = "freyavalerie/meowverter"
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,7 +27,7 @@ $root    = Split-Path $PSScriptRoot -Parent
 $src     = Join-Path $root "src-tauri"
 $conf    = Join-Path $src "tauri.conf.json"
 $cargo   = Join-Path $src "Cargo.toml"
-$keyFile = Join-Path $env:USERPROFILE ".catverter\updater.key"
+$keyFile = Join-Path $env:USERPROFILE ".meowverter\updater.key"
 
 function Fail($m) { Write-Host "`n[X] $m" -ForegroundColor Red; exit 1 }
 
@@ -51,12 +51,12 @@ $verMatch = [regex]::Match((Get-Content $conf -Raw), '"version":\s*"([^"]+)"')
 if (-not $verMatch.Success) { Fail "Couldn't read version from tauri.conf.json" }
 $ver = $verMatch.Groups[1].Value
 $tag = "v$ver"
-Write-Host "Releasing Catverter $tag" -ForegroundColor Cyan
+Write-Host "Releasing Meowverter $tag" -ForegroundColor Cyan
 
 # --- 2. build signed ---
 $env:TAURI_SIGNING_PRIVATE_KEY          = (Get-Content $keyFile -Raw)
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
-Stop-Process -Name catverter -Force -ErrorAction SilentlyContinue
+Stop-Process -Name meowverter -Force -ErrorAction SilentlyContinue
 Push-Location $src
 try {
   cargo tauri build --bundles nsis
@@ -87,7 +87,7 @@ Write-Host "Wrote $latest"
 # --- 4. publish ---
 Write-Host "Publishing GitHub release $tag to $Repo ..."
 gh release create $tag $exe.FullName $sig.FullName $latest `
-  --repo $Repo --title "Catverter $ver" --notes $Notes
+  --repo $Repo --title "Meowverter $ver" --notes $Notes
 if ($LASTEXITCODE -ne 0) { Fail "gh release create failed (is gh logged in as the repo owner?)" }
 
-Write-Host "`n[OK] Catverter $ver published. Existing installs will offer the update within a few hours (or on next launch)." -ForegroundColor Green
+Write-Host "`n[OK] Meowverter $ver published. Existing installs will offer the update within a few hours (or on next launch)." -ForegroundColor Green

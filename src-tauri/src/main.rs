@@ -1,4 +1,4 @@
-// Catverter - a cute, simple OLED-dark GUI for FFmpeg.
+// Meowverter - a cute, simple OLED-dark GUI for FFmpeg.
 // Keep the console in debug builds (handy for logs); hide it in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -43,7 +43,7 @@ fn new_cmd<P: AsRef<std::ffi::OsStr>>(program: P) -> Command {
 fn bin_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("Catverter")
+        .join("Meowverter")
         .join("bin")
 }
 
@@ -76,7 +76,7 @@ fn stored_ffmpeg(state: &AppState) -> Result<PathBuf, String> {
     let (m, p) = locate_tools();
     *state.ffmpeg.lock().unwrap() = m.clone();
     *state.ffprobe.lock().unwrap() = p;
-    m.ok_or_else(|| "ffmpeg not found - let Catverter download it first.".into())
+    m.ok_or_else(|| "ffmpeg not found - let Meowverter download it first.".into())
 }
 
 fn stored_ffprobe(state: &AppState) -> Result<PathBuf, String> {
@@ -86,7 +86,7 @@ fn stored_ffprobe(state: &AppState) -> Result<PathBuf, String> {
     let (m, p) = locate_tools();
     *state.ffmpeg.lock().unwrap() = m;
     *state.ffprobe.lock().unwrap() = p.clone();
-    p.ok_or_else(|| "ffprobe not found - let Catverter download it first.".into())
+    p.ok_or_else(|| "ffprobe not found - let Meowverter download it first.".into())
 }
 
 /// Whether NVIDIA NVENC (hevc) encoding works here. Tested once, then cached.
@@ -155,7 +155,7 @@ fn do_download(app: &AppHandle) -> Result<(), String> {
 
     emit("download", 0.0, "Reaching out for FFmpeg…");
     let client = reqwest::blocking::Client::builder()
-        .user_agent("Catverter")
+        .user_agent("Meowverter")
         .build()
         .map_err(|e| e.to_string())?;
     let mut resp = client
@@ -167,7 +167,7 @@ fn do_download(app: &AppHandle) -> Result<(), String> {
     }
     let total = resp.content_length().unwrap_or(0);
 
-    let tmp = std::env::temp_dir().join("catverter_ffmpeg.zip");
+    let tmp = std::env::temp_dir().join("meowverter_ffmpeg.zip");
     let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
     let mut buf = [0u8; 1 << 16];
     let mut done: u64 = 0;
@@ -236,7 +236,7 @@ fn do_download(app: &AppHandle) -> Result<(), String> {
 /// embedded date lags the publish time, which caused false "update" nags.
 fn latest_ffmpeg_marker() -> Result<String, String> {
     let client = reqwest::blocking::Client::builder()
-        .user_agent("Catverter")
+        .user_agent("Meowverter")
         .timeout(Duration::from_secs(12))
         .build()
         .map_err(|e| e.to_string())?;
@@ -500,7 +500,7 @@ async fn estimate_gif(state: State<'_, AppState>, opts: GifEstOpts) -> Result<u6
         q => q.parse::<i32>().unwrap_or(360).min(480),
     };
     let vf = gif_vf(fps, h, opts.gif_quality);
-    let tmp = std::env::temp_dir().join("catverter_gifest.gif");
+    let tmp = std::env::temp_dir().join("meowverter_gifest.gif");
     let _ = std::fs::remove_file(&tmp);
     let out = new_cmd(&ff)
         .args([
@@ -838,7 +838,7 @@ fn build_passes(o: &ConvertOpts, nvenc: bool, gpu_decode: bool) -> Result<Vec<Ve
                     return Ok(vec![a]);
                 }
 
-                let log = std::env::temp_dir().join("catverter_pass");
+                let log = std::env::temp_dir().join("meowverter_pass");
                 let logf = log.to_string_lossy().to_string();
 
                 let mut p1 = input_args(o, false);
@@ -1030,7 +1030,7 @@ async fn start_convert(app: AppHandle, state: State<'_, AppState>, opts: Convert
 
 /// "Delete original" epilogue: after a VERIFIED successful convert, move the
 /// source to the Recycle Bin (recoverable, never a hard delete). The converted
-/// file KEEPS its "_Catverter" name so you can always tell which files are
+/// file KEEPS its "_Meowverter" name so you can always tell which files are
 /// converted. Returns the (unchanged) output path.
 fn finish_delete_original(opts: &ConvertOpts, out_size: u64) -> String {
     if opts.delete_original && out_size > 0 && opts.input != opts.output {
@@ -1230,7 +1230,7 @@ fn ytdlp_path() -> Option<PathBuf> {
 
 fn http_download(url: &str, dest: &Path) -> Result<(), String> {
     let client = reqwest::blocking::Client::builder()
-        .user_agent("Catverter")
+        .user_agent("Meowverter")
         .build()
         .map_err(|e| e.to_string())?;
     let mut resp = client.get(url).send().map_err(|e| e.to_string())?;
@@ -1477,7 +1477,7 @@ fn do_youtube(app: &AppHandle, opts: &YtDownloadOpts) -> Result<(), String> {
         .or_else(dirs::home_dir)
         .unwrap_or_else(std::env::temp_dir);
     std::fs::create_dir_all(&out_dir).ok();
-    let pathfile = std::env::temp_dir().join("catverter_ytpath.txt");
+    let pathfile = std::env::temp_dir().join("meowverter_ytpath.txt");
     let _ = std::fs::remove_file(&pathfile);
 
     let mut args: Vec<String> = vec![
@@ -1785,7 +1785,7 @@ fn main() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running Catverter");
+        .expect("error while running Meowverter");
 }
 
 #[cfg(test)]
@@ -1845,10 +1845,10 @@ mod tests {
 
     #[test]
     fn delete_original_recycles_and_keeps_marked_name() {
-        let dir = std::env::temp_dir().join("catverter_delorig_test");
+        let dir = std::env::temp_dir().join("meowverter_delorig_test");
         let _ = std::fs::create_dir_all(&dir);
         let input = dir.join("orig.mkv");
-        let output = dir.join("orig_Catverter.mp4");
+        let output = dir.join("orig_Meowverter.mp4");
         std::fs::write(&input, b"original").unwrap();
         std::fs::write(&output, b"converted").unwrap();
         let o = from_js(&format!(
@@ -1858,7 +1858,7 @@ mod tests {
         ));
         let final_out = finish_delete_original(&o, 9);
         assert!(!input.exists(), "original should be recycled");
-        assert_eq!(final_out, output.to_string_lossy(), "output keeps its _Catverter name");
+        assert_eq!(final_out, output.to_string_lossy(), "output keeps its _Meowverter name");
         assert!(output.exists(), "converted file should still be there, marked");
         let _ = std::fs::remove_file(&output);
     }
