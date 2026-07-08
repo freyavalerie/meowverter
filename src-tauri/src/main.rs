@@ -2,6 +2,7 @@
 // Keep the console in debug builds (handy for logs); hide it in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -26,7 +27,7 @@ struct AppState {
     ffprobe: Mutex<Option<PathBuf>>,
     child: Mutex<Option<Child>>,
     cancel: Mutex<bool>,
-    nvenc: Mutex<Option<bool>>,
+    hw_cache: Mutex<HashMap<String, bool>>, // per-encoder "does this machine support it?"
 }
 
 // ---------------------------------------------------------------------------
@@ -90,15 +91,19 @@ fn stored_ffprobe(state: &AppState) -> Result<PathBuf, String> {
 }
 
 /// Whether NVIDIA NVENC (hevc) encoding works here. Tested once, then cached.
-fn nvenc_available(state: &AppState, ff: &Path) -> bool {
-    if let Some(v) = *state.nvenc.lock().unwrap() {
-        return v;
+/// Does this machine's ffmpeg actually encode with the given hardware encoder?
+/// Runs a tiny throwaway encode and caches the yes/no per encoder name. This is
+/// how we adapt to whatever GPU the user has (NVIDIA/AMD/Intel) without needing
+/// to know the model.
+fn hw_ok(state: &AppState, ff: &Path, encoder: &str) -> bool {
+    if let Some(v) = state.hw_cache.lock().unwrap().get(encoder) {
+        return *v;
     }
     let ok = new_cmd(ff)
         .args([
             "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi", "-i", "color=c=black:s=128x128:d=0.1",
-            "-c:v", "hevc_nvenc", "-f", "null", "-",
+            "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.1",
+            "-c:v", encoder, "-f", "null", "-",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -106,8 +111,103 @@ fn nvenc_available(state: &AppState, ff: &Path) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-    *state.nvenc.lock().unwrap() = Some(ok);
+    state.hw_cache.lock().unwrap().insert(encoder.to_string(), ok);
     ok
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Vendor {
+    Nvenc, // NVIDIA
+    Amf,   // AMD
+    Qsv,   // Intel
+    Cpu,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Family {
+    Hevc,
+    Av1,
+    Vp9,
+    H264,
+}
+
+#[derive(Clone, Copy)]
+struct VideoEnc {
+    vendor: Vendor,
+    name: &'static str, // ffmpeg encoder
+    family: Family,
+}
+
+/// The CPU encoder for a format (the always-available fallback).
+fn cpu_encoder(format: &str) -> VideoEnc {
+    match format {
+        "mp4_h265" => VideoEnc { vendor: Vendor::Cpu, name: "libx265", family: Family::Hevc },
+        "mp4_av1" => VideoEnc { vendor: Vendor::Cpu, name: "libsvtav1", family: Family::Av1 },
+        "webm" => VideoEnc { vendor: Vendor::Cpu, name: "libvpx-vp9", family: Family::Vp9 },
+        _ => VideoEnc { vendor: Vendor::Cpu, name: "libx264", family: Family::H264 },
+    }
+}
+
+/// Pick the fastest working encoder for the format: probe NVIDIA, then AMD, then
+/// Intel hardware; fall back to CPU. Result is cached per encoder in hw_ok.
+fn pick_encoder(state: &AppState, ff: &Path, format: &str) -> VideoEnc {
+    let (fam, cands): (Family, &[(Vendor, &'static str)]) = match format {
+        "mp4_h265" => (
+            Family::Hevc,
+            &[(Vendor::Nvenc, "hevc_nvenc"), (Vendor::Amf, "hevc_amf"), (Vendor::Qsv, "hevc_qsv")],
+        ),
+        // av1_amf is left out on purpose: its QP scale differs (0-255) and we
+        // can't verify it, so AMD AV1 falls back to CPU rather than risk bad output
+        "mp4_av1" => (Family::Av1, &[(Vendor::Nvenc, "av1_nvenc"), (Vendor::Qsv, "av1_qsv")]),
+        _ => return cpu_encoder(format),
+    };
+    for (v, name) in cands {
+        if hw_ok(state, ff, name) {
+            return VideoEnc { vendor: *v, name, family: fam };
+        }
+    }
+    cpu_encoder(format)
+}
+
+/// Constant-quality number for a hardware encoder (roughly a CRF; lower = better).
+fn quality_number(fam: Family, quality: &str) -> String {
+    let n = match (fam, quality) {
+        (Family::Av1, "high") => 27,
+        (Family::Av1, "small") => 42,
+        (Family::Av1, _) => 33,
+        (_, "high") => 23,
+        (_, "small") => 33,
+        (_, _) => 28,
+    };
+    n.to_string()
+}
+
+/// Hardware constant-quality args (`-c:v <enc> ...`), vendor-specific.
+fn hw_quality_args(venc: &VideoEnc, quality: &str) -> Vec<String> {
+    let q = quality_number(venc.family, quality);
+    let name = venc.name.to_string();
+    let v = |s: &str| s.to_string();
+    match venc.vendor {
+        Vendor::Nvenc => vec![v("-c:v"), name, v("-preset"), v("p6"), v("-rc"), v("vbr"), v("-cq"), q, v("-b:v"), v("0")],
+        Vendor::Qsv => vec![v("-c:v"), name, v("-preset"), v("medium"), v("-global_quality"), q],
+        Vendor::Amf => vec![v("-c:v"), name, v("-quality"), v("quality"), v("-rc"), v("cqp"), v("-qp_i"), q.clone(), v("-qp_p"), q.clone(), v("-qp_b"), q],
+        Vendor::Cpu => vec![],
+    }
+}
+
+/// Hardware bitrate (target-size) args, vendor-specific single-pass VBR.
+fn hw_bitrate_args(venc: &VideoEnc, vk: i64) -> Vec<String> {
+    let name = venc.name.to_string();
+    let vb = format!("{vk}k");
+    let mx = format!("{}k", (vk as f64 * 1.2).round() as i64);
+    let bf = format!("{}k", vk * 2);
+    let v = |s: &str| s.to_string();
+    match venc.vendor {
+        Vendor::Nvenc => vec![v("-c:v"), name, v("-preset"), v("p6"), v("-rc"), v("vbr"), v("-b:v"), vb, v("-maxrate"), mx, v("-bufsize"), bf, v("-multipass"), v("fullres")],
+        Vendor::Qsv => vec![v("-c:v"), name, v("-b:v"), vb, v("-maxrate"), mx],
+        Vendor::Amf => vec![v("-c:v"), name, v("-rc"), v("vbr_peak"), v("-b:v"), vb, v("-maxrate"), mx],
+        Vendor::Cpu => vec![],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +761,14 @@ fn codec_for(format: &str) -> Codec {
             pass_fmt: "mp4",
             extra: vec!["-tag:v", "hvc1"],
         },
+        "mp4_av1" => Codec {
+            venc: "libsvtav1",
+            aenc: "aac",
+            pix: true,
+            faststart: true,
+            pass_fmt: "mp4",
+            extra: vec![],
+        },
         "webm" => Codec {
             venc: "libvpx-vp9",
             aenc: "libopus",
@@ -697,6 +805,9 @@ fn crf_for(format: &str, quality: &str) -> &'static str {
         ("mp4_h265", "high") => "21",
         ("mp4_h265", "small") => "30",
         ("mp4_h265", _) => "26",
+        ("mp4_av1", "high") => "28",
+        ("mp4_av1", "small") => "45",
+        ("mp4_av1", _) => "35",
         (_, "high") => "18",
         (_, "small") => "27",
         (_, _) => "22",
@@ -746,7 +857,7 @@ fn scale_filter_named(res: &str, name: &str) -> Option<String> {
 }
 
 /// Build one or more passes (each a full ffmpeg arg vector).
-fn build_passes(o: &ConvertOpts, nvenc: bool, gpu_decode: bool) -> Result<Vec<Vec<String>>, String> {
+fn build_passes(o: &ConvertOpts, venc: VideoEnc, gpu_decode: bool) -> Result<Vec<Vec<String>>, String> {
     let progress = ["-progress", "pipe:1", "-nostats"];
 
     match o.mode.as_str() {
@@ -796,39 +907,56 @@ fn build_passes(o: &ConvertOpts, nvenc: bool, gpu_decode: bool) -> Result<Vec<Ve
             // video
             let c = codec_for(&o.format);
             let vf = scale_filter(&o.resolution);
-            let use_nvenc = nvenc && o.format == "mp4_h265";
-            let use_gpu = use_nvenc && gpu_decode; // full NVDEC->scale_cuda->NVENC pipeline
+            let hw = venc.vendor != Vendor::Cpu;
+            // full NVDEC -> scale_cuda -> NVENC pipeline (NVIDIA only)
+            let use_cuda = venc.vendor == Vendor::Nvenc && gpu_decode;
+            let svtav1 = venc.name == "libsvtav1";
 
             if let Some(mb) = o.target_size_mb {
-                // compress-to-size: two-pass with a computed bitrate
+                // compress-to-size with a computed bitrate
                 let dur = o.total_duration.max(0.1);
                 let audio_kbps = if c.aenc == "libopus" { 96.0 } else { 128.0 };
                 let total_kbps = mb * 8192.0 / dur;
                 let video_kbps = (total_kbps - audio_kbps).max(80.0);
-                let vb = format!("{}k", video_kbps.round() as i64);
+                let vk = video_kbps.round() as i64;
+                let vb = format!("{vk}k");
 
-                if use_nvenc {
-                    // GPU encode (one pass, internal multipass). Decode on GPU when possible.
-                    let vk = video_kbps.round() as i64;
-                    let mut a = input_args(o, use_gpu);
-                    let sc = if use_gpu { scale_filter_named(&o.resolution, "scale_cuda") } else { vf.clone() };
+                if hw {
+                    // single-pass hardware VBR to the target bitrate
+                    let mut a = input_args(o, use_cuda);
+                    let sc = if use_cuda { scale_filter_named(&o.resolution, "scale_cuda") } else { vf.clone() };
                     if let Some(f) = &sc {
                         a.push("-vf".into());
                         a.push(f.clone());
                     }
-                    a.extend(["-c:v", "hevc_nvenc", "-preset", "p6", "-rc", "vbr"].iter().map(|s| s.to_string()));
-                    a.push("-b:v".into());
-                    a.push(vb.clone());
-                    a.push("-maxrate".into());
-                    a.push(format!("{}k", (vk as f64 * 1.2).round() as i64));
-                    a.push("-bufsize".into());
-                    a.push(format!("{}k", vk * 2));
-                    a.extend(["-multipass", "fullres", "-tag:v", "hvc1"].iter().map(|s| s.to_string()));
-                    if !use_gpu {
+                    a.extend(hw_bitrate_args(&venc, vk));
+                    a.extend(c.extra.iter().map(|s| s.to_string())); // container tag (hvc1 for hevc)
+                    if !use_cuda {
                         a.push("-pix_fmt".into());
                         a.push("yuv420p".into());
                     }
                     a.push("-c:a".into());
+                    a.push(c.aenc.into());
+                    a.push("-b:a".into());
+                    a.push(format!("{}k", audio_kbps as i64));
+                    if c.faststart {
+                        a.extend(["-movflags", "+faststart"].iter().map(|s| s.to_string()));
+                    }
+                    a.extend(progress.iter().map(|s| s.to_string()));
+                    a.push(o.output.clone());
+                    return Ok(vec![a]);
+                }
+
+                if svtav1 {
+                    // CPU AV1: single-pass VBR (svtav1 two-pass is finicky)
+                    let mut a = input_args(o, false);
+                    if let Some(f) = &vf {
+                        a.push("-vf".into());
+                        a.push(f.clone());
+                    }
+                    a.extend(["-c:v", "libsvtav1", "-preset", "8", "-b:v"].iter().map(|s| s.to_string()));
+                    a.push(vb);
+                    a.extend(["-pix_fmt", "yuv420p", "-c:a"].iter().map(|s| s.to_string()));
                     a.push(c.aenc.into());
                     a.push("-b:a".into());
                     a.push(format!("{}k", audio_kbps as i64));
@@ -896,25 +1024,17 @@ fn build_passes(o: &ConvertOpts, nvenc: bool, gpu_decode: bool) -> Result<Vec<Ve
 
                 Ok(vec![p1, p2])
             } else {
-                if use_nvenc {
-                    // GPU constant-quality encode (cq ~ crf)
-                    let cq = match o.quality.as_str() {
-                        "high" => "23",
-                        "small" => "33",
-                        _ => "28",
-                    };
-                    let mut a = input_args(o, use_gpu);
-                    let sc = if use_gpu { scale_filter_named(&o.resolution, "scale_cuda") } else { vf.clone() };
+                if hw {
+                    // hardware constant-quality encode
+                    let mut a = input_args(o, use_cuda);
+                    let sc = if use_cuda { scale_filter_named(&o.resolution, "scale_cuda") } else { vf.clone() };
                     if let Some(f) = &sc {
                         a.push("-vf".into());
                         a.push(f.clone());
                     }
-                    a.extend(
-                        ["-c:v", "hevc_nvenc", "-preset", "p6", "-rc", "vbr", "-cq", cq, "-b:v", "0", "-tag:v", "hvc1"]
-                            .iter()
-                            .map(|s| s.to_string()),
-                    );
-                    if !use_gpu {
+                    a.extend(hw_quality_args(&venc, &o.quality));
+                    a.extend(c.extra.iter().map(|s| s.to_string())); // container tag (hvc1 for hevc)
+                    if !use_cuda {
                         a.push("-pix_fmt".into());
                         a.push("yuv420p".into());
                     }
@@ -922,12 +1042,14 @@ fn build_passes(o: &ConvertOpts, nvenc: bool, gpu_decode: bool) -> Result<Vec<Ve
                     a.push(c.aenc.into());
                     a.push("-b:a".into());
                     a.push("160k".into());
-                    a.extend(["-movflags", "+faststart"].iter().map(|s| s.to_string()));
+                    if c.faststart {
+                        a.extend(["-movflags", "+faststart"].iter().map(|s| s.to_string()));
+                    }
                     a.extend(progress.iter().map(|s| s.to_string()));
                     a.push(o.output.clone());
                     return Ok(vec![a]);
                 }
-                // quality (CRF) single pass
+                // CPU quality (CRF) single pass
                 let crf = crf_for(&o.format, &o.quality);
                 let mut a = input_args(o, false);
                 if let Some(f) = &vf {
@@ -938,6 +1060,8 @@ fn build_passes(o: &ConvertOpts, nvenc: bool, gpu_decode: bool) -> Result<Vec<Ve
                 a.push(c.venc.into());
                 if c.venc == "libvpx-vp9" {
                     a.extend(["-b:v", "0"].iter().map(|s| s.to_string()));
+                } else if svtav1 {
+                    a.extend(["-preset", "8"].iter().map(|s| s.to_string()));
                 } else {
                     a.extend(["-preset", "medium"].iter().map(|s| s.to_string()));
                 }
@@ -976,43 +1100,63 @@ fn cancel_convert(state: State<AppState>) {
 async fn start_convert(app: AppHandle, state: State<'_, AppState>, opts: ConvertOpts) -> Result<(), String> {
     let ffmpeg = stored_ffmpeg(&state)?;
     *state.cancel.lock().unwrap() = false;
-    let nvenc = nvenc_available(&state, &ffmpeg);
     let dur = opts.total_duration.max(0.1);
-    // validate the args build before spawning
-    build_passes(&opts, nvenc, nvenc)?;
+
+    // Pick the fastest working encoder for this machine, with a fallback chain:
+    // hardware + GPU decode -> hardware + CPU decode (NVIDIA) -> CPU encoder.
+    // If a "supported" hardware encoder still errors mid-encode, we step down.
+    let chosen = pick_encoder(&state, &ffmpeg, &opts.format);
+    let cpu = cpu_encoder(&opts.format);
+    let attempts: Vec<(VideoEnc, bool)> = if opts.mode != "video" {
+        vec![(cpu, false)] // audio/gif don't use the video encoder
+    } else if chosen.vendor == Vendor::Nvenc {
+        vec![(chosen, true), (chosen, false), (cpu, false)]
+    } else if chosen.vendor != Vendor::Cpu {
+        vec![(chosen, false), (cpu, false)]
+    } else {
+        vec![(cpu, false)]
+    };
+
+    // validate the first attempt builds before spawning
+    build_passes(&opts, attempts[0].0, attempts[0].1)?;
 
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
-        let mut gpu = nvenc; // attempt full-GPU decode pipeline first (NVENC only)
-        let mut passes = match build_passes(&opts, nvenc, gpu) {
-            Ok(p) => p,
-            Err(e) => { let _ = app.emit("convert", serde_json::json!({ "stage": "error", "message": e })); return; }
-        };
-        let mut idx = 0;
-        while idx < passes.len() {
-            if *state.cancel.lock().unwrap() {
-                break;
-            }
-            match run_pass(&app, &state, &ffmpeg, &passes[idx], dur, idx, passes.len()) {
-                Ok(true) => { idx += 1; } // finished this pass
-                Ok(false) => {
+        let mut attempt = 0;
+        loop {
+            let (venc, gpu_decode) = attempts[attempt];
+            let passes = match build_passes(&opts, venc, gpu_decode) {
+                Ok(p) => p,
+                Err(e) => { let _ = app.emit("convert", serde_json::json!({ "stage": "error", "message": e })); return; }
+            };
+            let mut idx = 0;
+            let mut retry = false;
+            while idx < passes.len() {
+                if *state.cancel.lock().unwrap() {
                     let _ = app.emit("convert", serde_json::json!({ "stage": "cancelled" }));
                     return;
                 }
-                Err(e) => {
-                    // GPU-decode pipeline failed on the first pass → fall back to CPU decode
-                    if gpu && idx == 0 && !*state.cancel.lock().unwrap() {
-                        gpu = false;
-                        if let Ok(p) = build_passes(&opts, nvenc, false) {
-                            passes = p;
-                            idx = 0;
-                            continue;
-                        }
+                match run_pass(&app, &state, &ffmpeg, &passes[idx], dur, idx, passes.len()) {
+                    Ok(true) => { idx += 1; } // finished this pass
+                    Ok(false) => {
+                        let _ = app.emit("convert", serde_json::json!({ "stage": "cancelled" }));
+                        return;
                     }
-                    let _ = app.emit("convert", serde_json::json!({ "stage": "error", "message": e }));
-                    return;
+                    Err(e) => {
+                        // a hardware encoder that isn't truly usable fails here ->
+                        // step down to the next attempt (which ends at the CPU encoder)
+                        if idx == 0 && attempt + 1 < attempts.len() && !*state.cancel.lock().unwrap() {
+                            attempt += 1;
+                            retry = true;
+                            break;
+                        }
+                        let _ = app.emit("convert", serde_json::json!({ "stage": "error", "message": e }));
+                        return;
+                    }
                 }
             }
+            if retry { continue; }
+            break;
         }
         let out_size = std::fs::metadata(&opts.output).map(|m| m.len()).unwrap_or(0);
         let final_out = finish_delete_original(&opts, out_size);
@@ -1819,7 +1963,7 @@ mod tests {
             r#"{"input":"a.mp4","output":"b.mp4","mode":"video","resolution":"source",
                 "format":"mp4_h264","quality":"balanced","targetSizeMb":10.0,"totalDuration":60.0}"#,
         );
-        assert_eq!(build_passes(&o, false, false).unwrap().len(), 2, "compress-to-size = two passes");
+        assert_eq!(build_passes(&o, cpu_encoder("mp4_h264"), false).unwrap().len(), 2, "compress-to-size = two passes");
     }
 
     #[test]
@@ -1828,7 +1972,7 @@ mod tests {
             r#"{"input":"a.mp4","output":"b.mp4","mode":"video","resolution":"1080",
                 "format":"mp4_h264","quality":"high","totalDuration":60.0}"#,
         );
-        assert_eq!(build_passes(&o, false, false).unwrap().len(), 1);
+        assert_eq!(build_passes(&o, cpu_encoder("mp4_h264"), false).unwrap().len(), 1);
     }
 
     #[test]
@@ -1869,17 +2013,48 @@ mod tests {
             r#"{"input":"a.mp4","output":"b.mp4","mode":"video","resolution":"1080",
                 "format":"mp4_h265","quality":"balanced","totalDuration":60.0}"#,
         );
+        let nv = VideoEnc { vendor: Vendor::Nvenc, name: "hevc_nvenc", family: Family::Hevc };
         // full-GPU pipeline: hwaccel + scale_cuda + nvenc, frames stay on GPU (no pix_fmt)
-        let g = &build_passes(&o, true, true).unwrap()[0];
+        let g = &build_passes(&o, nv, true).unwrap()[0];
         assert!(g.iter().any(|x| x == "-hwaccel"));
         assert!(g.iter().any(|x| x.contains("scale_cuda")));
         assert!(g.iter().any(|x| x == "hevc_nvenc"));
         assert!(!g.iter().any(|x| x == "yuv420p"), "gpu path must not force pix_fmt");
         // CPU-decode fallback: no hwaccel, CPU scale, pix_fmt yuv420p
-        let c = &build_passes(&o, true, false).unwrap()[0];
+        let c = &build_passes(&o, nv, false).unwrap()[0];
         assert!(!c.iter().any(|x| x == "-hwaccel"));
         assert!(c.iter().any(|x| x.as_str() == "scale=-2:1080"));
         assert!(c.iter().any(|x| x == "hevc_nvenc"));
         assert!(c.iter().any(|x| x == "yuv420p"));
+    }
+
+    #[test]
+    fn hardware_encoder_args_per_vendor() {
+        let o = from_js(
+            r#"{"input":"a.mp4","output":"b.mp4","mode":"video","resolution":"source",
+                "format":"mp4_h265","quality":"balanced","totalDuration":60.0}"#,
+        );
+        // Intel QSV -> global_quality, keeps the hevc tag
+        let qsv = &build_passes(&o, VideoEnc { vendor: Vendor::Qsv, name: "hevc_qsv", family: Family::Hevc }, false).unwrap()[0];
+        assert!(qsv.iter().any(|x| x == "hevc_qsv"));
+        assert!(qsv.iter().any(|x| x == "-global_quality"));
+        assert!(qsv.iter().any(|x| x == "hvc1"));
+        // AMD AMF -> constant QP
+        let amf = &build_passes(&o, VideoEnc { vendor: Vendor::Amf, name: "hevc_amf", family: Family::Hevc }, false).unwrap()[0];
+        assert!(amf.iter().any(|x| x == "hevc_amf"));
+        assert!(amf.iter().any(|x| x == "-qp_p"));
+        // AV1 in mp4: nvenc -> av1_nvenc + cq, no hevc tag
+        let oav = from_js(
+            r#"{"input":"a.mp4","output":"b.mp4","mode":"video","resolution":"source",
+                "format":"mp4_av1","quality":"balanced","totalDuration":60.0}"#,
+        );
+        let nav = &build_passes(&oav, VideoEnc { vendor: Vendor::Nvenc, name: "av1_nvenc", family: Family::Av1 }, false).unwrap()[0];
+        assert!(nav.iter().any(|x| x == "av1_nvenc"));
+        assert!(nav.iter().any(|x| x == "-cq"));
+        assert!(!nav.iter().any(|x| x == "hvc1"), "av1 has no hevc tag");
+        // AV1 CPU fallback -> libsvtav1 + crf
+        let cav = &build_passes(&oav, cpu_encoder("mp4_av1"), false).unwrap()[0];
+        assert!(cav.iter().any(|x| x == "libsvtav1"));
+        assert!(cav.iter().any(|x| x == "-crf"));
     }
 }

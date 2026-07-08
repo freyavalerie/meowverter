@@ -646,7 +646,7 @@ $("trimToggle").addEventListener("click", () => {
 function currentExt() {
   if (state.mode === "audio") return state.audioFormat;
   if (state.mode === "gif") return "gif";
-  return { mp4_h264: "mp4", mp4_h265: "mp4", webm: "webm", mkv: "mkv" }[state.format] || "mp4";
+  return { mp4_h264: "mp4", mp4_h265: "mp4", mp4_av1: "mp4", webm: "webm", mkv: "mkv" }[state.format] || "mp4";
 }
 let lastOutDir = localStorage.getItem("meowverter_outdir") || "";
 function recomputeOutput() {
