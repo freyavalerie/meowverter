@@ -314,6 +314,7 @@ function showSetup() {
 }
 $("dlBtn").addEventListener("click", async () => {
   $("dlBtn").disabled = true;
+  $("dlBtn").textContent = "Downloading…";
   $("setupBarWrap").classList.remove("hidden");
   $("setupSub").textContent = "Downloading FFmpeg…";
   await invoke("download_ffmpeg");
@@ -340,6 +341,7 @@ listen("setup", ({ payload }) => {
   if (payload.stage === "error") {
     $("setupSub").textContent = "Hmm, that failed: " + payload.message;
     $("dlBtn").disabled = false;
+    $("dlBtn").textContent = "Download FFmpeg";
     return;
   }
   if (payload.stage === "done") {

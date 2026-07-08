@@ -193,6 +193,8 @@ main::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8
 }
 .btn-primary:hover { transform: translateY(-2px); filter: brightness(1.08); }
 .btn-primary:active { transform: translateY(0); }
+.btn-primary:disabled { opacity: 0.5; cursor: default; }
+.btn-primary:disabled:hover { transform: none; filter: none; }
 
 .ghost {
   border: 1px solid var(--line-strong);
