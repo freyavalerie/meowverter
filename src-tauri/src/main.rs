@@ -1498,7 +1498,12 @@ fn do_youtube(app: &AppHandle, opts: &YtDownloadOpts) -> Result<(), String> {
         "after_move:filepath".into(),
         pathfile.to_string_lossy().to_string(),
         "-o".into(),
-        format!("{}\\%(title)s [%(id)s].%(ext)s", out_dir.to_string_lossy()),
+        // cap the title at 120 bytes: some sites (Facebook especially) use the
+        // whole video description as the "title", which blows past Windows' 260
+        // char path limit and the download fails to write
+        format!("{}\\%(title).120B [%(id)s].%(ext)s", out_dir.to_string_lossy()),
+        "--trim-filenames".into(), // extra safety for deep download folders
+        "200".into(),
     ];
     if opts.mode == "audio" {
         args.extend(
