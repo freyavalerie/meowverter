@@ -953,10 +953,9 @@ $("againBtn").addEventListener("click", () => $("doneOverlay").classList.add("hi
 
 // ---- app mode (Upload converter  vs  YouTube downloader) ---
 function setAppModeVisuals(mode) {
+  // mode: "landing" | "convert" | "youtube"
   state.appMode = mode;
   document.body.dataset.app = mode;
-  document.querySelectorAll("#appModeSwitch .modebtn").forEach((b) => b.classList.toggle("active", b.dataset.app === mode));
-  $("appModeGlow").style.transform = `translateX(${mode === "youtube" ? 100 : 0}%)`;
   $("resFirstPill").textContent = mode === "youtube" ? "Best" : "Source";
   updateConvertLabel();
 }
@@ -968,16 +967,17 @@ function updateConvertLabel() {
   el.textContent = "Convert";
 }
 function updateControlsVisibility() {
+  const mode = state.appMode;
   let show;
-  // fail open: info fetch failing shouldn't block downloading
-  if (state.appMode === "youtube") show = !!state.ytInfo || state.ytInfoFailed;
-  else show = state.batch || !!state.input;
+  if (mode === "landing") show = false; // nothing chosen yet
+  else if (mode === "youtube") show = !!state.ytInfo || state.ytInfoFailed; // fail open
+  else show = state.batch || !!state.input; // convert
   $("controls").classList.toggle("hidden", !show);
+  $("startOver").classList.toggle("hidden", mode === "landing");
   // trim needs a known duration - hide it when the video info is missing
   const tg = document.querySelector(".trim-group");
-  if (tg) tg.classList.toggle("hidden", state.appMode === "youtube" && !state.ytInfo);
-  if (state.appMode === "convert" && !state.batch) {
-    $("uploadPrompt").classList.toggle("hidden", !!state.input);
+  if (tg) tg.classList.toggle("hidden", mode === "youtube" && !state.ytInfo);
+  if (mode === "convert" && !state.batch) {
     $("fileCard").classList.toggle("hidden", !state.input);
   }
 }
@@ -1026,9 +1026,18 @@ function setAppMode(mode) {
   updateEstimate();
   fitWindow(true);
 }
-document.querySelectorAll("#appModeSwitch .modebtn").forEach((b) =>
-  b.addEventListener("click", () => setAppMode(b.dataset.app))
-);
+// return to the unified landing (clears whatever source was loaded)
+function goLanding() {
+  clearTimeout(ytFetchTimer);
+  state.input = null; state.info = null;
+  state.ytInfo = null; state.ytInfoFailed = false;
+  $("ytUrl").value = "";
+  $("ytInfo").classList.add("hidden");
+  $("ytFetching").classList.add("hidden");
+  $("ytFetching").classList.remove("err");
+  setAppMode("landing"); // clears batch/queue + resets visuals/trim/estimate
+}
+$("startOver").addEventListener("click", goLanding);
 
 // ---- batch queue (multiple files, shared settings) ---------
 function escapeHtml(s) {
@@ -1171,14 +1180,13 @@ $("batchAdd").addEventListener("click", async () => {
 });
 $("batchClear").addEventListener("click", () => {
   if (batchRunning) return;
-  state.queue = []; state.batch = false; document.body.dataset.batch = "off";
-  updateControlsVisibility(); fitWindow(true);
+  goLanding();
 });
 $("batchRows").addEventListener("click", (e) => {
   const rm = e.target.getAttribute && e.target.getAttribute("data-rm");
   if (rm == null || batchRunning) return;
   state.queue.splice(+rm, 1);
-  if (!state.queue.length) { state.batch = false; document.body.dataset.batch = "off"; updateControlsVisibility(); }
+  if (!state.queue.length) { goLanding(); } // last one removed -> back to the landing
   else { renderBatchList(); updateConvertLabel(); }
   fitWindow(true);
 });
@@ -1221,10 +1229,16 @@ $("ytUrl").addEventListener("input", () => {
   ytSizeCache.clear();
   $("ytInfo").classList.add("hidden");
   $("ytFetching").classList.remove("err");
-  updateControlsVisibility();
-  updateTrimStageVisibility();
-  updateEstimate();
-  if (!/^https?:\/\/\S+/i.test(url)) { $("ytFetching").classList.add("hidden"); return; }
+  if (!/^https?:\/\/\S+/i.test(url)) {
+    // not a link (yet) - drop back to the landing if we were in download mode
+    $("ytFetching").classList.add("hidden");
+    if (state.appMode === "youtube") setAppMode("landing");
+    else { updateControlsVisibility(); updateTrimStageVisibility(); updateEstimate(); }
+    return;
+  }
+  // a link -> commit to download mode (hides the upload prompt, shows download controls)
+  if (state.appMode !== "youtube") setAppMode("youtube");
+  else { updateControlsVisibility(); updateTrimStageVisibility(); updateEstimate(); }
   $("ytFetching").textContent = "Reading video…";
   $("ytFetching").classList.remove("hidden");
   ytFetchTimer = setTimeout(() => fetchYtInfo(url), 600);
@@ -1383,7 +1397,7 @@ window.addEventListener("blur", () => setAnimPaused(true));
 window.addEventListener("focus", () => setAnimPaused(false));
 
 // ---- boot --------------------------------------------------
-setAppModeVisuals("convert");
+setAppModeVisuals("landing");
 updateControlsVisibility();
 checkFfmpeg();
 // re-check for an ffmpeg update every 6 hours while the app stays open

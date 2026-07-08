@@ -282,13 +282,35 @@ main::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8
 @keyframes marquee { to { transform: translateX(-50%); } }
 .modes.two { grid-template-columns: repeat(2, 1fr); }
 .modes.two .mode-glow { width: calc((100% - 10px) / 2); }
-.appmode { margin-bottom: 18px; }
-
-/* ---------- adaptive mode visibility ---------- */
-body[data-app="convert"] .youtube-only { display: none !important; }
-body[data-app="youtube"] .convert-only { display: none !important; }
+/* ---------- adaptive mode visibility (landing / convert / youtube) ---------- */
+body:not([data-app="landing"]) .landing-only { display: none !important; }
+body:not([data-app="convert"]) .convert-only { display: none !important; }
+body:not([data-app="youtube"]) .youtube-only { display: none !important; }
+body[data-app="convert"] .link-source { display: none !important; } /* url input hides once a file is loaded */
 body[data-app="youtube"] .modebtn[data-mode="gif"] { display: none !important; }
 .controls.hidden { display: none !important; }
+
+/* ---------- landing: upload OR paste a link ---------- */
+.landing-or {
+  display: flex; align-items: center; gap: 14px;
+  color: var(--muted-2); font-size: 12.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  margin: -2px 2px;
+}
+.landing-or::before, .landing-or::after {
+  content: ""; flex: 1; height: 1px; background: var(--line);
+}
+/* start over */
+.startover {
+  align-self: flex-start;
+  display: flex; align-items: center; gap: 7px;
+  background: none; border: none; cursor: pointer;
+  color: var(--muted); font-size: 13px; font-weight: 600;
+  padding: 2px 0; margin-bottom: -6px;
+  transition: color .2s, transform .12s;
+}
+.startover:hover { color: var(--text); }
+.startover:active { transform: scale(.96); }
 
 /* ---------- upload prompt ---------- */
 .upload-prompt {
