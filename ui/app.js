@@ -67,6 +67,9 @@ async function mockInvoke(cmd, args) {
       const qf = { 1: 0.4, 2: 0.6, 3: 0.8, 4: 1.0, 5: 1.35 }[o.gifQuality || 3] || 0.8;
       return Math.round(w * h * (o.fps || 15) * (o.duration || 1) * 0.18 * qf);
     }
+    case "resolve_spotify":
+      await new Promise((r) => setTimeout(r, 500));
+      return { youtubeUrl: "https://youtube.com/watch?v=dQw4w9WgXcQ", title: "Rick Astley - Never Gonna Give You Up", thumbnail: mockThumb(0), duration: 213 };
     case "youtube_info":
       await new Promise((r) => setTimeout(r, 500));
       return {
@@ -205,6 +208,7 @@ const state = {
   batch: false,
   queue: [],
   ytInfoFailed: false,
+  dlUrl: null, // the URL we actually download (= the pasted link, or a Spotify→YouTube match)
   deleteOriginal: localStorage.getItem("meowverter_delorig") === "1",
   batchOutDir: localStorage.getItem("meowverter_batchoutdir") || "", // "" = same folder as each file
   mode: "video",
@@ -779,7 +783,8 @@ function updateYtEstimate() {
 }
 function scheduleYtSize() {
   const el = $("ytSizeEst");
-  const url = $("ytUrl").value.trim();
+  if (state.mode === "audio") { el.textContent = ""; return; } // audio downloads: no size estimate
+  const url = state.dlUrl || $("ytUrl").value.trim();
   const quality = state.resolution === "source" ? "best" : state.resolution;
   const key = `${url}|${quality}`;
   if (ytSizeCache.has(key)) { showYtSize(ytSizeCache.get(key)); return; }
@@ -789,7 +794,8 @@ function scheduleYtSize() {
     try {
       const bytes = await invoke("youtube_size", { opts: { url, quality } });
       ytSizeCache.set(key, bytes);
-      const curKey = `${$("ytUrl").value.trim()}|${state.resolution === "source" ? "best" : state.resolution}`;
+      const curUrl = state.dlUrl || $("ytUrl").value.trim();
+      const curKey = `${curUrl}|${state.resolution === "source" ? "best" : state.resolution}`;
       if (state.appMode === "youtube" && state.mode !== "audio" && curKey === key) showYtSize(bytes);
     } catch (e) {
       el.textContent = "";
@@ -851,7 +857,7 @@ async function startConvert() {
 }
 
 function startYoutube() {
-  const url = $("ytUrl").value.trim();
+  const url = state.dlUrl || $("ytUrl").value.trim(); // resolved YouTube URL for Spotify links
   if (!url) { $("ytUrl").focus(); return; }
   if (!/^https?:\/\/\S+/i.test(url)) { alert("That doesn't look like a video link."); return; }
   const dur = curDuration();
@@ -1221,11 +1227,26 @@ listen("tauri://drag-drop", () => document.body.classList.remove("drag"));
 
 // ---- youtube: fetch info as the link is typed --------------
 let ytFetchTimer;
+function isSpotify(u) { return /open\.spotify\.com|spotify\.com\/track|spotify:track/i.test(u); }
+
+// begin reading a pasted link (Spotify gets resolved to a YouTube match first)
+function startFetch(raw) {
+  clearTimeout(ytFetchTimer);
+  state.ytInfoFailed = false;
+  if (state.mode !== "video") setMode("video"); // fresh link defaults to video; music auto-flips to audio
+  const f = $("ytFetching");
+  f.textContent = isSpotify(raw) ? "Finding the song…" : "Reading video…";
+  f.classList.remove("err", "hidden");
+  if (isSpotify(raw)) resolveAndFetch(raw);
+  else { state.dlUrl = raw; fetchYtInfo(raw, raw); }
+}
+
 $("ytUrl").addEventListener("input", () => {
   const url = $("ytUrl").value.trim();
   clearTimeout(ytFetchTimer);
   state.ytInfo = null;
   state.ytInfoFailed = false;
+  state.dlUrl = null;
   ytSizeCache.clear();
   $("ytInfo").classList.add("hidden");
   $("ytFetching").classList.remove("err");
@@ -1239,55 +1260,68 @@ $("ytUrl").addEventListener("input", () => {
   // a link -> commit to download mode (hides the upload prompt, shows download controls)
   if (state.appMode !== "youtube") setAppMode("youtube");
   else { updateControlsVisibility(); updateTrimStageVisibility(); updateEstimate(); }
-  $("ytFetching").textContent = "Reading video…";
+  $("ytFetching").textContent = isSpotify(url) ? "Finding the song…" : "Reading video…";
   $("ytFetching").classList.remove("hidden");
-  ytFetchTimer = setTimeout(() => fetchYtInfo(url), 600);
+  ytFetchTimer = setTimeout(() => startFetch(url), 600);
 });
 // Enter = fetch right away; tap the error line to retry
 $("ytUrl").addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
   const url = $("ytUrl").value.trim();
-  if (!/^https?:\/\/\S+/i.test(url)) return;
-  clearTimeout(ytFetchTimer);
-  state.ytInfoFailed = false;
-  const f = $("ytFetching");
-  f.textContent = "Reading video…"; f.classList.remove("err", "hidden");
-  fetchYtInfo(url);
+  if (/^https?:\/\/\S+/i.test(url)) startFetch(url);
 });
 $("ytFetching").addEventListener("click", () => {
-  const f = $("ytFetching");
-  if (!f.classList.contains("err")) return;
+  if (!$("ytFetching").classList.contains("err")) return;
   const url = $("ytUrl").value.trim();
-  if (!/^https?:\/\/\S+/i.test(url)) return;
-  state.ytInfoFailed = false;
-  f.textContent = "Reading video…"; f.classList.remove("err");
-  fetchYtInfo(url);
+  if (/^https?:\/\/\S+/i.test(url)) startFetch(url);
 });
-async function fetchYtInfo(url) {
+
+// Spotify -> find the same song on YouTube, then treat it as an audio download
+async function resolveAndFetch(raw) {
   try {
-    const info = await invoke("youtube_info", { url });
-    if ($("ytUrl").value.trim() !== url) return; // user kept typing
+    const s = await invoke("resolve_spotify", { url: raw });
+    if ($("ytUrl").value.trim() !== raw) return; // user kept typing
+    state.dlUrl = s.youtubeUrl;
+    setMode("audio"); // it's music
+    fetchYtInfo(s.youtubeUrl, raw, { title: s.title, thumbnail: s.thumbnail });
+  } catch (e) {
+    if ($("ytUrl").value.trim() !== raw) return;
+    showYtError(raw, e);
+  }
+}
+
+async function fetchYtInfo(fetchUrl, raw, override) {
+  raw = raw || fetchUrl;
+  try {
+    const info = await invoke("youtube_info", { url: fetchUrl });
+    if ($("ytUrl").value.trim() !== raw) return; // user kept typing
+    state.dlUrl = fetchUrl;
+    if (override) { // Spotify: keep the clean "Artist - Track" name + cover art
+      if (override.title) info.title = override.title;
+      if (override.thumbnail) info.thumbnail = override.thumbnail;
+    }
     state.ytInfo = info;
     $("ytFetching").classList.add("hidden");
     $("ytThumb").src = info.thumbnail || "";
     $("ytTitle").textContent = info.title || "(untitled)";
     const chips = [];
-    if (info.width && info.height) chips.push(`${info.width}×${info.height}`);
+    if (info.width && info.height && state.mode !== "audio") chips.push(`${info.width}×${info.height}`);
     if (info.duration) chips.push(fmtTime(info.duration));
     $("ytChips").innerHTML = chips.map((c) => `<span class="chip">${c}</span>`).join("");
     $("ytInfo").classList.remove("hidden");
     if (info.width && info.height) {
       document.querySelector(".frame-wrap.big").style.setProperty("--ar", `${info.width} / ${info.height}`);
     }
+    // audio-only source (SoundCloud, music) -> default to an audio download
+    if (!info.width || !info.height) setMode("audio");
     refreshResPills(); // hide resolutions above what the video offers
     state.trimStart = 0;
     state.trimEnd = info.duration;
     initTrim();
     // per-quality sizes come free with the info fetch - no extra requests
-    // (rapid repeat requests are what trip YouTube's bot checks)
     if (info.sizes) {
       for (const [q, b] of Object.entries(info.sizes)) {
-        if (b > 0) ytSizeCache.set(`${url}|${q}`, b);
+        if (b > 0) ytSizeCache.set(`${fetchUrl}|${q}`, b);
       }
     }
     updateControlsVisibility();
@@ -1295,19 +1329,24 @@ async function fetchYtInfo(url) {
     updateEstimate();
     fitWindow(true);
   } catch (e) {
-    if ($("ytUrl").value.trim() !== url) return;
-    // fail open: show the controls anyway - the download itself usually still works
-    state.ytInfoFailed = true;
-    refreshResPills(); // no known max height -> show all quality pills
-    const f = $("ytFetching");
-    f.textContent = friendlyYtError(String(e)) + " - tap here to retry, or just hit Download.";
-    f.classList.add("err");
-    f.classList.remove("hidden");
-    updateControlsVisibility();
-    updateTrimStageVisibility();
-    updateEstimate();
-    fitWindow(true);
+    if ($("ytUrl").value.trim() !== raw) return;
+    showYtError(raw, e);
   }
+}
+
+function showYtError(raw, e) {
+  // fail open: show the controls anyway - the download itself often still works
+  state.ytInfoFailed = true;
+  state.dlUrl = state.dlUrl || raw;
+  refreshResPills();
+  const f = $("ytFetching");
+  f.textContent = friendlyYtError(String(e)) + " - tap here to retry, or just hit Download.";
+  f.classList.add("err");
+  f.classList.remove("hidden");
+  updateControlsVisibility();
+  updateTrimStageVisibility();
+  updateEstimate();
+  fitWindow(true);
 }
 
 function friendlyYtError(m) {

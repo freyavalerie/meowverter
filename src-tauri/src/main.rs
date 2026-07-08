@@ -1470,6 +1470,86 @@ fn sizes_from_formats(v: &serde_json::Value) -> std::collections::HashMap<String
     out
 }
 
+/// Pull the content of a `<meta property="PROP" content="...">` tag.
+fn meta_content(html: &str, prop: &str) -> Option<String> {
+    let needle = format!("property=\"{prop}\"");
+    let i = html.find(&needle)?;
+    let after = &html[i + needle.len()..];
+    let c = after.find("content=\"")?;
+    let rest = &after[c + "content=\"".len()..];
+    let end = rest.find('"')?;
+    Some(html_unescape(rest[..end].trim()))
+}
+
+fn html_unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SpotifyResolved {
+    youtube_url: String,
+    title: String,
+    thumbnail: String,
+    duration: f64,
+}
+
+/// Spotify audio is DRM-locked and can't be downloaded. Instead we read the
+/// track name + artist from the public Spotify page (no login involved) and
+/// find the same song on YouTube, which the normal downloader then grabs.
+#[tauri::command]
+async fn resolve_spotify(url: String) -> Result<SpotifyResolved, String> {
+    // 1) read the public page for "track" + "artist"
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let html = client
+        .get(&url)
+        .send()
+        .and_then(|r| r.text())
+        .map_err(|e| e.to_string())?;
+    let track = meta_content(&html, "og:title").ok_or("Couldn't read that Spotify link.")?;
+    let desc = meta_content(&html, "og:description").unwrap_or_default();
+    // og:description looks like "Artist · Album · Song · Year"
+    let artist = desc.split('·').next().unwrap_or("").trim().to_string();
+    let thumbnail = meta_content(&html, "og:image").unwrap_or_default();
+    let query = if artist.is_empty() { track.clone() } else { format!("{artist} {track}") };
+
+    // 2) find the best match on YouTube
+    let yt = ytdlp_path().ok_or("yt-dlp isn't installed yet.")?;
+    let bin = bin_dir();
+    let path_env = format!("{};{}", bin.to_string_lossy(), std::env::var("PATH").unwrap_or_default());
+    let out = new_cmd(&yt)
+        .args(["--no-warnings", "--no-playlist", "--print", "%(webpage_url)s", "--print", "%(duration)s"])
+        .arg(format!("ytsearch1:{query}"))
+        .env("PATH", path_env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err("Couldn't find that song to download.".into());
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut lines = s.lines().filter(|l| !l.trim().is_empty());
+    let youtube_url = lines.next().unwrap_or("").trim().to_string();
+    let duration = lines.next().and_then(|d| d.trim().parse::<f64>().ok()).unwrap_or(0.0);
+    if youtube_url.is_empty() {
+        return Err("Couldn't find that song to download.".into());
+    }
+    let title = if artist.is_empty() { track } else { format!("{artist} - {track}") };
+    Ok(SpotifyResolved { youtube_url, title, thumbnail, duration })
+}
+
 #[tauri::command]
 async fn youtube_info(url: String) -> Result<YtInfo, String> {
     let yt = ytdlp_path().ok_or("yt-dlp isn't installed yet.")?;
@@ -1875,6 +1955,7 @@ fn main() {
             pick_output,
             notify_done,
             reveal,
+            resolve_spotify,
             youtube_info,
             youtube_size,
             download_youtube,
