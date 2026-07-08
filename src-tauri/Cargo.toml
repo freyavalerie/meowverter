@@ -1,6 +1,6 @@
 [package]
 name = "meowverter"
-version = "0.1.1"
+version = "0.1.2"
 description = "A cute, simple OLED-dark GUI for FFmpeg"
 authors = ["Freya"]
 edition = "2021"
