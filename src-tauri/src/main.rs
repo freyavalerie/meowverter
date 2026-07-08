@@ -1,4 +1,4 @@
-// Catverter — a cute, simple OLED-dark GUI for FFmpeg.
+// Catverter - a cute, simple OLED-dark GUI for FFmpeg.
 // Keep the console in debug builds (handy for logs); hide it in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -16,7 +16,7 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-// BtbN's rolling "latest" GPL build — includes x264, x265, vpx/vp9, opus, mp3lame, etc.
+// BtbN's rolling "latest" GPL build - includes x264, x265, vpx/vp9, opus, mp3lame, etc.
 const FFMPEG_URL: &str =
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
 
@@ -76,7 +76,7 @@ fn stored_ffmpeg(state: &AppState) -> Result<PathBuf, String> {
     let (m, p) = locate_tools();
     *state.ffmpeg.lock().unwrap() = m.clone();
     *state.ffprobe.lock().unwrap() = p;
-    m.ok_or_else(|| "ffmpeg not found — let Catverter download it first.".into())
+    m.ok_or_else(|| "ffmpeg not found - let Catverter download it first.".into())
 }
 
 fn stored_ffprobe(state: &AppState) -> Result<PathBuf, String> {
@@ -86,7 +86,7 @@ fn stored_ffprobe(state: &AppState) -> Result<PathBuf, String> {
     let (m, p) = locate_tools();
     *state.ffmpeg.lock().unwrap() = m;
     *state.ffprobe.lock().unwrap() = p.clone();
-    p.ok_or_else(|| "ffprobe not found — let Catverter download it first.".into())
+    p.ok_or_else(|| "ffprobe not found - let Catverter download it first.".into())
 }
 
 /// Whether NVIDIA NVENC (hevc) encoding works here. Tested once, then cached.
@@ -122,7 +122,7 @@ struct FfmpegStatus {
 }
 
 // NOTE: heavy/blocking commands are `async` so they run on the async runtime's
-// thread pool — sync Tauri commands run on the MAIN thread and freeze the UI.
+// thread pool - sync Tauri commands run on the MAIN thread and freeze the UI.
 #[tauri::command]
 async fn check_ffmpeg(state: State<'_, AppState>) -> Result<FfmpegStatus, String> {
     let path = on_path("ffmpeg");
@@ -231,7 +231,7 @@ fn do_download(app: &AppHandle) -> Result<(), String> {
 // command: check for an FFmpeg update (BtbN rolling build)
 // ---------------------------------------------------------------------------
 
-/// A stable identifier for the latest BtbN build — the win64-gpl asset's upload
+/// A stable identifier for the latest BtbN build - the win64-gpl asset's upload
 /// time. We store the one we installed and compare against this; the build's own
 /// embedded date lags the publish time, which caused false "update" nags.
 fn latest_ffmpeg_marker() -> Result<String, String> {
@@ -563,7 +563,7 @@ struct VmafOpts {
 async fn vmaf(state: State<'_, AppState>, opts: VmafOpts) -> Result<f64, String> {
     let ff = stored_ffmpeg(&state)?;
     let fp = stored_ffprobe(&state)?;
-    // output dimensions — reference is scaled to match so VMAF can compare frame-for-frame
+    // output dimensions - reference is scaled to match so VMAF can compare frame-for-frame
     let dout = new_cmd(&fp)
         .args([
             "-v", "error", "-select_streams", "v:0",
@@ -667,7 +667,7 @@ fn codec_for(format: &str) -> Codec {
             pix: false,
             faststart: false,
             pass_fmt: "webm",
-            // row-mt + a practical speed level — VP9 defaults to cpu-used 0 (glacial)
+            // row-mt + a practical speed level - VP9 defaults to cpu-used 0 (glacial)
             extra: vec!["-row-mt", "1", "-deadline", "good", "-cpu-used", "4"],
         },
         "mkv" => Codec {
@@ -1264,7 +1264,7 @@ struct YtInfo {
 }
 
 /// Approximate download size per quality (best video ≤ cap + best audio) straight
-/// from the info JSON's formats — avoids extra yt-dlp calls per link, since rapid
+/// from the info JSON's formats - avoids extra yt-dlp calls per link, since rapid
 /// repeat requests are exactly what trips YouTube's bot checks.
 fn sizes_from_formats(v: &serde_json::Value) -> std::collections::HashMap<String, u64> {
     let mut out = std::collections::HashMap::new();
@@ -1700,7 +1700,7 @@ async fn install_app_update(app: AppHandle) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    // new version is installed — relaunch into it (this call never returns)
+    // new version is installed - relaunch into it (this call never returns)
     app.restart()
 }
 
@@ -1733,7 +1733,7 @@ fn main() {
             install_app_update,
         ])
         .setup(|app| {
-            // keep yt-dlp fresh (YouTube regularly breaks older versions) —
+            // keep yt-dlp fresh (YouTube regularly breaks older versions) -
             // silent self-update in the background, at most every 3 days
             std::thread::spawn(|| {
                 let yt = bin_dir().join("yt-dlp.exe");

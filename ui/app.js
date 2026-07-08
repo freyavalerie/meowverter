@@ -70,7 +70,7 @@ async function mockInvoke(cmd, args) {
     case "youtube_info":
       await new Promise((r) => setTimeout(r, 500));
       return {
-        title: "Cool Demo Video — 4K HDR Test Footage", duration: 213.4, thumbnail: mockThumb(0), width: 1920, height: 1080,
+        title: "Cool Demo Video - 4K HDR Test Footage", duration: 213.4, thumbnail: mockThumb(0), width: 1920, height: 1080,
         sizes: { best: 168_000_000, "1080": 43_000_000, "720": 19_000_000, "480": 9_500_000, "360": 5_200_000 },
       };
     case "vmaf":
@@ -128,7 +128,7 @@ const appWin = winMod ? winMod.getCurrentWindow() : null;
 // ---- keep the window at least as tall as the content ----------
 // Coalesces the many fitWindow() calls a single load triggers into ONE
 // resize on the next frame, and skips the resize entirely when the height
-// hasn't changed — WebView2 briefly blanks the page on every real resize, so
+// hasn't changed - WebView2 briefly blanks the page on every real resize, so
 // fewer/smaller resizes = no "blank flash" when files show up.
 const MINW = 760;
 let fitTimer, fitRaf = 0, fitWantResize = false, lastFitH = 0;
@@ -180,7 +180,7 @@ function fmtTimeFine(s) {
   return `${m}:${sec.padStart(5, "0")}`;
 }
 function fmtBytes(b) {
-  if (!b) return "—";
+  if (!b) return "-";
   const u = ["B", "KB", "MB", "GB"];
   let i = 0;
   while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
@@ -254,10 +254,10 @@ async function checkFfmpegUpdate() {
       badge.classList.remove("ok");
       badge.classList.add("update");
       $("ffText").textContent = "Update ffmpeg";
-      badge.title = `Newer FFmpeg build available (${(u.latest || "").slice(0, 10)}) — click to update`;
+      badge.title = `Newer FFmpeg build available (${(u.latest || "").slice(0, 10)}) - click to update`;
     }
   } catch (e) {
-    /* offline or rate-limited — just leave it as "ready" */
+    /* offline or rate-limited - just leave it as "ready" */
   }
 }
 $("ffBadge").addEventListener("click", () => {
@@ -284,7 +284,7 @@ async function checkAppUpdate() {
       pill.classList.remove("hidden");
     }
   } catch (e) {
-    /* no release yet, offline, or rate-limited — just no pill */
+    /* no release yet, offline, or rate-limited - just no pill */
   }
 }
 $("appUpdatePill").addEventListener("click", async () => {
@@ -372,7 +372,7 @@ async function loadFile(path) {
   state.info = null;
   document.body.dataset.batch = "off";
 
-  // paint the card shell right away so the drop feels instant — ffprobe on a
+  // paint the card shell right away so the drop feels instant - ffprobe on a
   // big file (or a sleeping drive) can take a moment, and we don't make the
   // user stare at a blank page while it runs
   setAppModeVisuals("convert");
@@ -563,7 +563,7 @@ function scheduleThumb(which) {
   const w = which === "end" ? "end" : "start";
   const t = w === "end" ? Math.max(0, state.trimEnd - 0.05) : state.trimStart;
   $("thumbTag").textContent = (w === "end" ? "OUT · " : "IN · ") + fmtTimeFine(t);
-  // YouTube: no local file to grab frames from — show the video's poster
+  // YouTube: no local file to grab frames from - show the video's poster
   if (state.appMode === "youtube") {
     if (state.ytInfo && state.ytInfo.thumbnail) $("thumbView").src = state.ytInfo.thumbnail;
     return;
@@ -659,7 +659,7 @@ function recomputeOutput() {
   updateOutLabel();
 }
 function updateOutLabel() {
-  if (!state.output) { $("outName").textContent = "—"; return; }
+  if (!state.output) { $("outName").textContent = "-"; return; }
   const { name } = splitPath(state.output);
   $("outName").textContent = name;
   $("outName").title = state.output;
@@ -709,13 +709,13 @@ function updateEstimate() {
   if (state.appMode === "youtube") { updateYtEstimate(); return; }
   const el = $("sizeEstimate");
   if (!el) return;
-  // GIF: too content-dependent for a formula — encode a short sample and scale it
+  // GIF: too content-dependent for a formula - encode a short sample and scale it
   if (state.appMode === "convert" && state.mode === "gif" && state.input) {
     scheduleGifEstimate();
     return;
   }
   const bytes = estimateBytes();
-  if (bytes == null) { el.textContent = "—"; return; }
+  if (bytes == null) { el.textContent = "-"; return; }
   const isTarget = state.mode === "video" && state.sizeMode === "target";
   el.textContent = (isTarget ? "≤ " : "≈ ") + fmtBytes(bytes);
 }
@@ -971,7 +971,7 @@ function updateControlsVisibility() {
   if (state.appMode === "youtube") show = !!state.ytInfo || state.ytInfoFailed;
   else show = state.batch || !!state.input;
   $("controls").classList.toggle("hidden", !show);
-  // trim needs a known duration — hide it when the video info is missing
+  // trim needs a known duration - hide it when the video info is missing
   const tg = document.querySelector(".trim-group");
   if (tg) tg.classList.toggle("hidden", state.appMode === "youtube" && !state.ytInfo);
   if (state.appMode === "convert" && !state.batch) {
@@ -1044,7 +1044,7 @@ async function loadQueue(paths) {
   updateControlsVisibility();
   updateConvertLabel();
   fitWindow(true);
-  // probe all files in parallel — each row fills in as its probe lands
+  // probe all files in parallel - each row fills in as its probe lands
   await Promise.all(state.queue.map(async (f) => {
     try { f.info = await invoke("probe", { path: f.path }); } catch (e) { /* keep null */ }
     renderBatchList();
@@ -1150,7 +1150,7 @@ async function runBatch() {
   const done = state.queue.filter((f) => f.status === "done").length;
   if (done > 0) invoke("notify_done", { title: "Catverter", body: `${done} of ${state.queue.length} files converted` });
 }
-// append files to the queue (dedupes; safe to call mid-run — the run loop
+// append files to the queue (dedupes; safe to call mid-run - the run loop
 // re-checks queue length each iteration, so added files get converted too)
 async function appendToQueue(paths) {
   const have = new Set(state.queue.map((f) => f.path));
@@ -1267,7 +1267,7 @@ async function fetchYtInfo(url) {
     state.trimStart = 0;
     state.trimEnd = info.duration;
     initTrim();
-    // per-quality sizes come free with the info fetch — no extra requests
+    // per-quality sizes come free with the info fetch - no extra requests
     // (rapid repeat requests are what trip YouTube's bot checks)
     if (info.sizes) {
       for (const [q, b] of Object.entries(info.sizes)) {
@@ -1280,11 +1280,11 @@ async function fetchYtInfo(url) {
     fitWindow(true);
   } catch (e) {
     if ($("ytUrl").value.trim() !== url) return;
-    // fail open: show the controls anyway — the download itself usually still works
+    // fail open: show the controls anyway - the download itself usually still works
     state.ytInfoFailed = true;
     refreshResPills(); // no known max height -> show all quality pills
     const f = $("ytFetching");
-    f.textContent = friendlyYtError(String(e)) + " — tap here to retry, or just hit Download.";
+    f.textContent = friendlyYtError(String(e)) + " - tap here to retry, or just hit Download.";
     f.classList.add("err");
     f.classList.remove("hidden");
     updateControlsVisibility();
@@ -1319,7 +1319,7 @@ listen("yt", ({ payload }) => {
     setTimeout(() => {
       $("progressOverlay").classList.add("hidden");
       const { name } = splitPath(payload.path);
-      $("doneSub").textContent = name + " — saved to Downloads";
+      $("doneSub").textContent = name + " - saved to Downloads";
       $("againBtn").textContent = "Download another";
       $("doneOverlay").classList.remove("hidden");
     }, 300);
@@ -1327,7 +1327,7 @@ listen("yt", ({ payload }) => {
     $("progressOverlay").classList.add("hidden");
   } else if (payload.stage === "error") {
     $("progressOverlay").classList.add("hidden");
-    alert("Download failed:\n" + friendlyYtError(payload.message) + "\n\nBot-checks and hiccups usually pass — try again in a moment.");
+    alert("Download failed:\n" + friendlyYtError(payload.message) + "\n\nBot-checks and hiccups usually pass - try again in a moment.");
   }
 });
 

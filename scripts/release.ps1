@@ -1,5 +1,5 @@
 <#
-  Catverter release — one command to ship an update.
+  Catverter release - one command to ship an update.
 
   What it does:
     1. (optional) bumps the version in tauri.conf.json + Cargo.toml
@@ -32,7 +32,7 @@ $keyFile = Join-Path $env:USERPROFILE ".catverter\updater.key"
 function Fail($m) { Write-Host "`n[X] $m" -ForegroundColor Red; exit 1 }
 
 # --- 0. sanity ---
-if (-not (Test-Path $keyFile)) { Fail "Signing key not found at $keyFile (back this up — it's the only way to ship trusted updates)." }
+if (-not (Test-Path $keyFile)) { Fail "Signing key not found at $keyFile (back this up - it's the only way to ship trusted updates)." }
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Fail "GitHub CLI (gh) not found on PATH." }
 
 # --- 1. optional version bump ---

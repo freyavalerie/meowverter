@@ -5,7 +5,7 @@
 # Bundled installers + updater artifacts (published to GitHub Releases, not the repo)
 /src-tauri/target/release/bundle/
 
-# Signing keys — NEVER commit these (they live in ~/.catverter/ anyway)
+# Signing keys - NEVER commit these (they live in ~/.catverter/ anyway)
 *.key
 *.key.pub
 updater.key*

@@ -1,5 +1,5 @@
 /* ============================================================
-   Catverter — OLED dark + animated RGB
+   Catverter - OLED dark + animated RGB
    ============================================================ */
 
 @property --hue {
@@ -19,7 +19,7 @@
 
 :root {
   --hue: 0;
-  /* steps() = 12 hue updates/sec instead of 60 — same look, ~80% less repaint work */
+  /* steps() = 12 hue updates/sec instead of 60 - same look, ~80% less repaint work */
   animation: hueDrift 20s steps(240) infinite;
 
   --bg: #000000;
@@ -35,7 +35,7 @@
   --c1: hsl(calc(var(--hue) + 0) 92% 60%);
   --c2: hsl(calc(var(--hue) + 300) 88% 62%);
   --c3: hsl(calc(var(--hue) + 200) 90% 58%);
-  /* full pride rainbow — loops seamlessly (last stop == first), cycles via --hue drift */
+  /* full pride rainbow - loops seamlessly (last stop == first), cycles via --hue drift */
   --rgb-line: linear-gradient(110deg,
     hsl(calc(var(--hue) +   0) 90% 55%),
     hsl(calc(var(--hue) +  60) 90% 55%),
@@ -49,7 +49,7 @@
     hsl(calc(var(--hue) + 120) 90% 55%),
     hsl(calc(var(--hue) + 240) 90% 55%),
     hsl(calc(var(--hue) + 360) 90% 55%));
-  /* horizontal version for the sliding Convert bar — tiles seamlessly */
+  /* horizontal version for the sliding Convert bar - tiles seamlessly */
   --rgb-bar: linear-gradient(90deg,
     hsl(calc(var(--hue) +   0) 90% 55%),
     hsl(calc(var(--hue) +  60) 90% 55%),
@@ -76,7 +76,7 @@ html, body {
   user-select: none;
 }
 
-/* pure OLED black background — no ambient color field */
+/* pure OLED black background - no ambient color field */
 .aurora { display: none; }
 
 #app {
@@ -166,7 +166,7 @@ html, body {
 main { flex: 1; overflow-y: auto; overflow-x: hidden; padding-right: 4px; display: flex; flex-direction: column; gap: 20px; scroll-behavior: smooth; }
 .controls { display: flex; flex-direction: column; gap: 20px; }
 
-/* cascading entrance — replays whenever a section is revealed */
+/* cascading entrance - replays whenever a section is revealed */
 .controls > * { animation: rise .34s cubic-bezier(.22, .9, .32, 1) backwards; }
 .controls > *:nth-child(2) { animation-delay: .05s; }
 .controls > *:nth-child(3) { animation-delay: .09s; }
@@ -268,7 +268,7 @@ main::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8
   box-shadow: 0 4px 20px hsl(calc(var(--hue) + 320) 90% 60% / 0.4);
   transition: transform .32s cubic-bezier(.5,.05,.2,1);
 }
-/* flowing gradient as a transform marquee — composited, zero repaint */
+/* flowing gradient as a transform marquee - composited, zero repaint */
 .mode-glow::before {
   content: ""; position: absolute; top: 0; left: 0;
   height: 100%; width: 200%;
@@ -442,7 +442,7 @@ body:not([data-batch="on"]) .batch-only { display: none !important; }
   box-shadow: 0 0 22px hsl(calc(var(--hue) + 320) 90% 60% / 0.28);
 }
 
-/* gradient ring cut with mask-compositing — one clean AA pass, no jagged
+/* gradient ring cut with mask-compositing - one clean AA pass, no jagged
    inner edge like the old padding-box/border-box double-background trick */
 .pill.active::before,
 .trim-toggle.active::before,
@@ -596,7 +596,7 @@ input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.15); }
 @keyframes slideGrad { to { background-position: 200% 0; } }
 .convert:hover { transform: translateY(-2px); filter: brightness(1.06); }
 .convert:active { transform: translateY(0) scale(.985); }
-/* flowing gradient as a transform marquee — composited, zero repaint */
+/* flowing gradient as a transform marquee - composited, zero repaint */
 .convert::after {
   content: ""; position: absolute; top: 0; left: 0; z-index: 0;
   height: 100%; width: 200%;
