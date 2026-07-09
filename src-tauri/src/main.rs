@@ -1505,9 +1505,11 @@ struct SpotifyResolved {
 /// find the same song on YouTube, which the normal downloader then grabs.
 #[tauri::command]
 async fn resolve_spotify(url: String) -> Result<SpotifyResolved, String> {
-    // 1) read the public page for "track" + "artist"
+    // 1) read the public page for "track" + "artist". Use a link-preview crawler
+    // UA: Spotify serves a tiny JS stub (no metadata) to real-browser UAs, but the
+    // full server-rendered page WITH og: tags to crawlers.
     let client = reqwest::blocking::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+        .user_agent("facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)")
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;

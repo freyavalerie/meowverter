@@ -859,6 +859,7 @@ async function startConvert() {
 function startYoutube() {
   const url = state.dlUrl || $("ytUrl").value.trim(); // resolved YouTube URL for Spotify links
   if (!url) { $("ytUrl").focus(); return; }
+  if (isSpotify(url)) { alert("Couldn't find that song to download. Try a different link, or paste the artist and title into a YouTube search."); return; }
   if (!/^https?:\/\/\S+/i.test(url)) { alert("That doesn't look like a video link."); return; }
   const dur = curDuration();
   const opts = {
@@ -1286,7 +1287,15 @@ async function resolveAndFetch(raw) {
     fetchYtInfo(s.youtubeUrl, raw, { title: s.title, thumbnail: s.thumbnail });
   } catch (e) {
     if ($("ytUrl").value.trim() !== raw) return;
-    showYtError(raw, e);
+    // Spotify can't fall back to a direct download, so don't show the controls
+    state.ytInfoFailed = false;
+    state.dlUrl = null;
+    const f = $("ytFetching");
+    f.textContent = "Couldn't find that song - try a different link.";
+    f.classList.add("err");
+    f.classList.remove("hidden");
+    updateControlsVisibility();
+    fitWindow(true);
   }
 }
 
