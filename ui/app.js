@@ -67,7 +67,7 @@ async function mockInvoke(cmd, args) {
       const qf = { 1: 0.4, 2: 0.6, 3: 0.8, 4: 1.0, 5: 1.35 }[o.gifQuality || 3] || 0.8;
       return Math.round(w * h * (o.fps || 15) * (o.duration || 1) * 0.18 * qf);
     }
-    case "resolve_spotify":
+    case "resolve_music":
       await new Promise((r) => setTimeout(r, 500));
       return { youtubeUrl: "https://youtube.com/watch?v=dQw4w9WgXcQ", title: "Rick Astley - Never Gonna Give You Up", thumbnail: mockThumb(0), duration: 213 };
     case "youtube_info":
@@ -859,7 +859,7 @@ async function startConvert() {
 function startYoutube() {
   const url = state.dlUrl || $("ytUrl").value.trim(); // resolved YouTube URL for Spotify links
   if (!url) { $("ytUrl").focus(); return; }
-  if (isSpotify(url)) { alert("Couldn't find that song to download. Try a different link, or paste the artist and title into a YouTube search."); return; }
+  if (isMusicLink(url)) { alert("Couldn't find that song to download. Try a different link, or paste the artist and title into a YouTube search."); return; }
   if (!/^https?:\/\/\S+/i.test(url)) { alert("That doesn't look like a video link."); return; }
   const dur = curDuration();
   const opts = {
@@ -1228,7 +1228,8 @@ listen("tauri://drag-drop", () => document.body.classList.remove("drag"));
 
 // ---- youtube: fetch info as the link is typed --------------
 let ytFetchTimer;
-function isSpotify(u) { return /open\.spotify\.com|spotify\.com\/track|spotify:track/i.test(u); }
+// DRM streaming services we resolve to a YouTube match instead of downloading directly
+function isMusicLink(u) { return /spotify\.com|spotify:|music\.apple\.com|tidal\.com|deezer\.com/i.test(u); }
 
 // begin reading a pasted link (Spotify gets resolved to a YouTube match first)
 function startFetch(raw) {
@@ -1236,9 +1237,9 @@ function startFetch(raw) {
   state.ytInfoFailed = false;
   if (state.mode !== "video") setMode("video"); // fresh link defaults to video; music auto-flips to audio
   const f = $("ytFetching");
-  f.textContent = isSpotify(raw) ? "Finding the song…" : "Reading video…";
+  f.textContent = isMusicLink(raw) ? "Finding the song…" : "Reading video…";
   f.classList.remove("err", "hidden");
-  if (isSpotify(raw)) resolveAndFetch(raw);
+  if (isMusicLink(raw)) resolveAndFetch(raw);
   else { state.dlUrl = raw; fetchYtInfo(raw, raw); }
 }
 
@@ -1261,7 +1262,7 @@ $("ytUrl").addEventListener("input", () => {
   // a link -> commit to download mode (hides the upload prompt, shows download controls)
   if (state.appMode !== "youtube") setAppMode("youtube");
   else { updateControlsVisibility(); updateTrimStageVisibility(); updateEstimate(); }
-  $("ytFetching").textContent = isSpotify(url) ? "Finding the song…" : "Reading video…";
+  $("ytFetching").textContent = isMusicLink(url) ? "Finding the song…" : "Reading video…";
   $("ytFetching").classList.remove("hidden");
   ytFetchTimer = setTimeout(() => startFetch(url), 600);
 });
@@ -1280,7 +1281,7 @@ $("ytFetching").addEventListener("click", () => {
 // Spotify -> find the same song on YouTube, then treat it as an audio download
 async function resolveAndFetch(raw) {
   try {
-    const s = await invoke("resolve_spotify", { url: raw });
+    const s = await invoke("resolve_music", { url: raw });
     if ($("ytUrl").value.trim() !== raw) return; // user kept typing
     state.dlUrl = s.youtubeUrl;
     setMode("audio"); // it's music

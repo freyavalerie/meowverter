@@ -1493,37 +1493,80 @@ fn html_unescape(s: &str) -> String {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SpotifyResolved {
+struct MusicResolved {
     youtube_url: String,
     title: String,
     thumbnail: String,
     duration: f64,
 }
 
-/// Spotify audio is DRM-locked and can't be downloaded. Instead we read the
-/// track name + artist from the public Spotify page (no login involved) and
-/// find the same song on YouTube, which the normal downloader then grabs.
-#[tauri::command]
-async fn resolve_spotify(url: String) -> Result<SpotifyResolved, String> {
-    // 1) read the public page for "track" + "artist". Use a link-preview crawler
-    // UA: Spotify serves a tiny JS stub (no metadata) to real-browser UAs, but the
-    // full server-rendered page WITH og: tags to crawlers.
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)")
+// Streaming pages serve a metadata-less JS stub to browser UAs but the full
+// server-rendered page (with og: tags) to link-preview crawlers.
+const CRAWLER_UA: &str = "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)";
+
+fn http_text(url: &str) -> Result<String, String> {
+    reqwest::blocking::Client::builder()
+        .user_agent(CRAWLER_UA)
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|e| e.to_string())?;
-    let html = client
-        .get(&url)
+        .map_err(|e| e.to_string())?
+        .get(url)
         .send()
         .and_then(|r| r.text())
-        .map_err(|e| e.to_string())?;
-    let track = meta_content(&html, "og:title").ok_or("Couldn't read that Spotify link.")?;
-    let desc = meta_content(&html, "og:description").unwrap_or_default();
-    // og:description looks like "Artist · Album · Song · Year"
-    let artist = desc.split('·').next().unwrap_or("").trim().to_string();
-    let thumbnail = meta_content(&html, "og:image").unwrap_or_default();
-    let query = if artist.is_empty() { track.clone() } else { format!("{artist} {track}") };
+        .map_err(|e| e.to_string())
+}
+
+fn deezer_track_id(url: &str) -> Option<String> {
+    let after = url.split("/track/").nth(1)?;
+    let id: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if id.is_empty() { None } else { Some(id) }
+}
+
+/// Streaming audio (Spotify, Apple Music, Tidal, Deezer) is DRM-locked and can't
+/// be downloaded. Instead we read the track + artist from the public page/API
+/// (no login involved) and find the same song on YouTube, which the downloader
+/// then grabs. Returns the matching YouTube URL + display info.
+#[tauri::command]
+async fn resolve_music(url: String) -> Result<MusicResolved, String> {
+    let u = url.to_lowercase();
+
+    // 1) build a "artist track" search query + a clean display title + cover art
+    let (query, title, thumbnail) = if u.contains("deezer.com") {
+        // Deezer has a free public API - cleaner than scraping
+        let id = deezer_track_id(&url).ok_or("Couldn't read that Deezer link.")?;
+        let body = http_text(&format!("https://api.deezer.com/track/{id}"))?;
+        let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+        let track = v.get("title").and_then(|x| x.as_str()).ok_or("Couldn't read that Deezer link.")?.to_string();
+        let artist = v.get("artist").and_then(|a| a.get("name")).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let thumb = v.get("album").and_then(|a| a.get("cover_medium")).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        (format!("{artist} {track}"), format!("{artist} - {track}"), thumb)
+    } else {
+        // scrape the og: tags (Spotify / Apple Music / Tidal)
+        let html = http_text(&url)?;
+        let og_title = meta_content(&html, "og:title").ok_or("Couldn't read that music link.")?;
+        let thumb = meta_content(&html, "og:image").unwrap_or_default();
+        if u.contains("music.apple.com") {
+            // og:title = "Track by Artist on Apple Music" (note: nbsp between Apple & Music,
+            // so split on " on Apple" to be safe)
+            let core = og_title.split(" on Apple").next().unwrap_or(og_title.as_str()).trim();
+            match core.rsplit_once(" by ") {
+                Some((track, artist)) => (format!("{artist} {track}"), format!("{artist} - {track}"), thumb),
+                None => (core.to_string(), core.to_string(), thumb),
+            }
+        } else if u.contains("tidal.com") {
+            // og:title = "Artist - Track" (already a good query + display)
+            (og_title.clone(), og_title, thumb)
+        } else {
+            // Spotify: og:title = track, og:description = "Artist · Album · Song · Year"
+            let desc = meta_content(&html, "og:description").unwrap_or_default();
+            let artist = desc.split('·').next().unwrap_or("").trim().to_string();
+            if artist.is_empty() {
+                (og_title.clone(), og_title, thumb)
+            } else {
+                (format!("{artist} {og_title}"), format!("{artist} - {og_title}"), thumb)
+            }
+        }
+    };
 
     // 2) find the best match on YouTube
     let yt = ytdlp_path().ok_or("yt-dlp isn't installed yet.")?;
@@ -1548,8 +1591,7 @@ async fn resolve_spotify(url: String) -> Result<SpotifyResolved, String> {
     if youtube_url.is_empty() {
         return Err("Couldn't find that song to download.".into());
     }
-    let title = if artist.is_empty() { track } else { format!("{artist} - {track}") };
-    Ok(SpotifyResolved { youtube_url, title, thumbnail, duration })
+    Ok(MusicResolved { youtube_url, title, thumbnail, duration })
 }
 
 #[tauri::command]
@@ -1957,7 +1999,7 @@ fn main() {
             pick_output,
             notify_done,
             reveal,
-            resolve_spotify,
+            resolve_music,
             youtube_info,
             youtube_size,
             download_youtube,
