@@ -46,19 +46,10 @@
         Start over
       </button>
 
-      <!-- LANDING: upload a video, or paste a link -->
-      <button class="upload-prompt landing-only" id="uploadPrompt">
-        <span class="up-glyph">
-          <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="m6 10 6-6 6 6"/><path d="M4 20h16"/></svg>
-        </span>
-        <span class="up-title">Upload a video</span>
-        <span class="up-sub">click, or drop files - several at once becomes a queue</span>
-      </button>
-      <div class="landing-or landing-only"><span>or paste a link</span></div>
-
+      <!-- LANDING: paste a link, or upload a video -->
       <!-- link source: shows on the landing and in download mode -->
       <section class="yt-source link-source" id="ytSource">
-        <input type="text" id="ytUrl" class="yt-input" placeholder="YouTube, SoundCloud, Spotify, TikTok…" spellcheck="false" autocomplete="off" />
+        <input type="text" id="ytUrl" class="yt-input" placeholder="Paste a link - YouTube, SoundCloud, Spotify, TikTok…" spellcheck="false" autocomplete="off" />
         <div class="yt-fetching hidden" id="ytFetching">Reading video…</div>
         <div class="yt-info hidden" id="ytInfo">
           <img id="ytThumb" alt="" />
@@ -68,6 +59,14 @@
           </div>
         </div>
       </section>
+      <div class="landing-or landing-only"><span>or</span></div>
+      <button class="upload-prompt landing-only" id="uploadPrompt">
+        <span class="up-glyph">
+          <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="m6 10 6-6 6 6"/><path d="M4 20h16"/></svg>
+        </span>
+        <span class="up-title">Upload a video</span>
+        <span class="up-sub">click, or drop files - several at once becomes a queue</span>
+      </button>
 
       <!-- convert source: single file + batch queue -->
       <section class="filecard convert-only single-only hidden" id="fileCard">
