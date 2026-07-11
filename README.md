@@ -1,37 +1,44 @@
-# Meowverter
+# Meowverter 🏳️‍🌈
 
-A little FFmpeg app that stays out of your way. Pure black, rainbow, and quick.
-Convert videos, pull the audio out, make GIFs, or grab a clip off YouTube and a
-bunch of other sites. It leans on your GPU (NVENC) to encode, so things move fast
-and your CPU stays free.
+Meowverter is my simple all-in-one video converter and downloader for Windows.
+I made it because FFmpeg is amazing, but it does not need to feel complicated.
+
+Drop in a video or paste a link and Meowverter figures out what to show you. The
+design is pure OLED black with pride RGB colors, smooth animations, and a UI that
+actually feels nice to use.
 
 ![Meowverter converting a video](docs/screenshot.png)
 
-## Download
+## Download ⬇️
 
-Head to the [releases page](https://github.com/freyavalerie/meowverter/releases/latest),
-grab `Meowverter_x.x.x_x64-setup.exe`, and run it. Windows 10 and 11, 64-bit.
+Go to the [latest release](https://github.com/freyavalerie/meowverter/releases/latest),
+download the setup `.exe`, and run it. Meowverter is made for 64-bit Windows 10
+and Windows 11.
 
-The first time you run it, Windows might throw up a SmartScreen warning about an
-unknown publisher. That's only because I haven't bought a signing certificate.
-Click "More info", then "Run anyway", and it won't ask again. From there the app
-keeps itself up to date on its own.
+Windows might complain about an unknown publisher the first time. That is only
+because I have not bought a Windows code-signing certificate yet. Click "More
+info" and then "Run anyway". After installing, Meowverter can update itself from
+inside the app.
 
-FFmpeg downloads itself the first time you open the app, so there's nothing else
-to set up.
+FFmpeg and the downloader tools set themselves up automatically, so you do not
+need to install anything else.
 
-## What it does
+## What it can do ✨
 
-- Convert to MP4 (H.265) or WebM, either by quality or a target file size (handy
-  when Discord won't take your clip)
-- Encodes on the GPU, and falls back to the CPU if your card can't do a format
-- Rip audio to MP3, M4A, or WAV, or turn a clip into a GIF with a quality slider
-- Trim down to the exact frame, with a live preview
-- Download from YouTube, TikTok, X, Twitch, and plenty more
-- Drop a whole folder in at once, set your options once, and let it work through
-  the queue
-- Optionally send the original to the Recycle Bin and keep a tidy
-  `name_Meowverter.mp4`
-- One click gives you a quality score so you can see how close the result looks to
-  the original
-- Updates itself from inside the app
+- Convert videos to MP4 H.265, AV1, or WebM
+- Pick a quality preset or aim for an exact file size for Discord
+- Automatically use the fastest supported NVIDIA, AMD, or Intel encoder
+- Fall back to your CPU when the selected format needs it
+- Trim to the exact frame with a large live preview
+- Rip audio to MP3, M4A, or WAV
+- Make GIFs with resolution, FPS, quality, trimming, and a live size estimate
+- Download videos from YouTube, TikTok, Facebook, X, Twitch, SoundCloud, and more
+- Match Spotify, Apple Music, Deezer, and Tidal songs with a downloadable source
+- Queue multiple videos and convert all of them with the same settings
+- Optionally move originals to the Recycle Bin after a successful conversion
+- Keep converted files easy to spot with the `_Meowverter` name
+- Compare the result to the original with a VMAF quality score
+- Show progress, download speed, ETA, estimated size, and space saved
+- Update Meowverter and FFmpeg from inside the app
+
+That is basically it. Simple when you want it, powerful when you need it.
