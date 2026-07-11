@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 // BtbN's rolling "latest" GPL build - includes x264, x265, vpx/vp9, opus, mp3lame, etc.
 const FFMPEG_URL: &str =
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
+const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+const DENO_URL: &str =
+    "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip";
 
 #[derive(Default)]
 struct AppState {
@@ -27,8 +31,12 @@ struct AppState {
     ffprobe: Mutex<Option<PathBuf>>,
     child: Mutex<Option<Child>>,
     cancel: Mutex<bool>,
+    active_job: Mutex<bool>,
+    tool_setup: Mutex<()>,
     hw_cache: Mutex<HashMap<String, bool>>, // per-encoder "does this machine support it?"
 }
+
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -48,6 +56,16 @@ fn bin_dir() -> PathBuf {
         .join("bin")
 }
 
+fn temp_path(prefix: &str, extension: &str) -> PathBuf {
+    let n = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let suffix = if extension.is_empty() {
+        String::new()
+    } else {
+        format!(".{extension}")
+    };
+    std::env::temp_dir().join(format!("{prefix}_{}_{}{suffix}", std::process::id(), n))
+}
+
 /// Returns Some(path) if `exe -version` runs successfully (i.e. it's on PATH).
 fn on_path(exe: &str) -> Option<PathBuf> {
     let ok = new_cmd(exe)
@@ -61,13 +79,37 @@ fn on_path(exe: &str) -> Option<PathBuf> {
     ok.then(|| PathBuf::from(exe))
 }
 
-/// Prefer a system install (no download needed); fall back to our downloaded copy.
+/// Prefer Meowverter's bundled tools. This avoids launching several `-version`
+/// checks on every startup and ensures the updater manages the tools we use.
 fn locate_tools() -> (Option<PathBuf>, Option<PathBuf>) {
     let local_mpeg = bin_dir().join("ffmpeg.exe");
     let local_probe = bin_dir().join("ffprobe.exe");
-    let ffmpeg = on_path("ffmpeg").or_else(|| local_mpeg.exists().then_some(local_mpeg));
-    let ffprobe = on_path("ffprobe").or_else(|| local_probe.exists().then_some(local_probe));
+    let ffmpeg = local_mpeg
+        .exists()
+        .then_some(local_mpeg)
+        .or_else(|| on_path("ffmpeg"));
+    let ffprobe = local_probe
+        .exists()
+        .then_some(local_probe)
+        .or_else(|| on_path("ffprobe"));
     (ffmpeg, ffprobe)
+}
+
+fn claim_job(state: &AppState) -> Result<(), String> {
+    let mut active = state.active_job.lock().unwrap();
+    if *active {
+        return Err("Another conversion or download is already running.".into());
+    }
+    *active = true;
+    Ok(())
+}
+
+struct ActiveJob<'a>(&'a AppState);
+
+impl Drop for ActiveJob<'_> {
+    fn drop(&mut self) {
+        *self.0.active_job.lock().unwrap() = false;
+    }
 }
 
 fn stored_ffmpeg(state: &AppState) -> Result<PathBuf, String> {
@@ -101,9 +143,18 @@ fn hw_ok(state: &AppState, ff: &Path, encoder: &str) -> bool {
     }
     let ok = new_cmd(ff)
         .args([
-            "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.1",
-            "-c:v", encoder, "-f", "null", "-",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=256x256:d=0.1",
+            "-c:v",
+            encoder,
+            "-f",
+            "null",
+            "-",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -111,7 +162,11 @@ fn hw_ok(state: &AppState, ff: &Path, encoder: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-    state.hw_cache.lock().unwrap().insert(encoder.to_string(), ok);
+    state
+        .hw_cache
+        .lock()
+        .unwrap()
+        .insert(encoder.to_string(), ok);
     ok
 }
 
@@ -141,10 +196,26 @@ struct VideoEnc {
 /// The CPU encoder for a format (the always-available fallback).
 fn cpu_encoder(format: &str) -> VideoEnc {
     match format {
-        "mp4_h265" => VideoEnc { vendor: Vendor::Cpu, name: "libx265", family: Family::Hevc },
-        "mp4_av1" => VideoEnc { vendor: Vendor::Cpu, name: "libsvtav1", family: Family::Av1 },
-        "webm" => VideoEnc { vendor: Vendor::Cpu, name: "libvpx-vp9", family: Family::Vp9 },
-        _ => VideoEnc { vendor: Vendor::Cpu, name: "libx264", family: Family::H264 },
+        "mp4_h265" => VideoEnc {
+            vendor: Vendor::Cpu,
+            name: "libx265",
+            family: Family::Hevc,
+        },
+        "mp4_av1" => VideoEnc {
+            vendor: Vendor::Cpu,
+            name: "libsvtav1",
+            family: Family::Av1,
+        },
+        "webm" => VideoEnc {
+            vendor: Vendor::Cpu,
+            name: "libvpx-vp9",
+            family: Family::Vp9,
+        },
+        _ => VideoEnc {
+            vendor: Vendor::Cpu,
+            name: "libx264",
+            family: Family::H264,
+        },
     }
 }
 
@@ -154,16 +225,27 @@ fn pick_encoder(state: &AppState, ff: &Path, format: &str) -> VideoEnc {
     let (fam, cands): (Family, &[(Vendor, &'static str)]) = match format {
         "mp4_h265" => (
             Family::Hevc,
-            &[(Vendor::Nvenc, "hevc_nvenc"), (Vendor::Amf, "hevc_amf"), (Vendor::Qsv, "hevc_qsv")],
+            &[
+                (Vendor::Nvenc, "hevc_nvenc"),
+                (Vendor::Amf, "hevc_amf"),
+                (Vendor::Qsv, "hevc_qsv"),
+            ],
         ),
         // av1_amf is left out on purpose: its QP scale differs (0-255) and we
         // can't verify it, so AMD AV1 falls back to CPU rather than risk bad output
-        "mp4_av1" => (Family::Av1, &[(Vendor::Nvenc, "av1_nvenc"), (Vendor::Qsv, "av1_qsv")]),
+        "mp4_av1" => (
+            Family::Av1,
+            &[(Vendor::Nvenc, "av1_nvenc"), (Vendor::Qsv, "av1_qsv")],
+        ),
         _ => return cpu_encoder(format),
     };
     for (v, name) in cands {
         if hw_ok(state, ff, name) {
-            return VideoEnc { vendor: *v, name, family: fam };
+            return VideoEnc {
+                vendor: *v,
+                name,
+                family: fam,
+            };
         }
     }
     cpu_encoder(format)
@@ -188,9 +270,40 @@ fn hw_quality_args(venc: &VideoEnc, quality: &str) -> Vec<String> {
     let name = venc.name.to_string();
     let v = |s: &str| s.to_string();
     match venc.vendor {
-        Vendor::Nvenc => vec![v("-c:v"), name, v("-preset"), v("p6"), v("-rc"), v("vbr"), v("-cq"), q, v("-b:v"), v("0")],
-        Vendor::Qsv => vec![v("-c:v"), name, v("-preset"), v("medium"), v("-global_quality"), q],
-        Vendor::Amf => vec![v("-c:v"), name, v("-quality"), v("quality"), v("-rc"), v("cqp"), v("-qp_i"), q.clone(), v("-qp_p"), q.clone(), v("-qp_b"), q],
+        Vendor::Nvenc => vec![
+            v("-c:v"),
+            name,
+            v("-preset"),
+            v("p6"),
+            v("-rc"),
+            v("vbr"),
+            v("-cq"),
+            q,
+            v("-b:v"),
+            v("0"),
+        ],
+        Vendor::Qsv => vec![
+            v("-c:v"),
+            name,
+            v("-preset"),
+            v("medium"),
+            v("-global_quality"),
+            q,
+        ],
+        Vendor::Amf => vec![
+            v("-c:v"),
+            name,
+            v("-quality"),
+            v("quality"),
+            v("-rc"),
+            v("cqp"),
+            v("-qp_i"),
+            q.clone(),
+            v("-qp_p"),
+            q.clone(),
+            v("-qp_b"),
+            q,
+        ],
         Vendor::Cpu => vec![],
     }
 }
@@ -203,9 +316,33 @@ fn hw_bitrate_args(venc: &VideoEnc, vk: i64) -> Vec<String> {
     let bf = format!("{}k", vk * 2);
     let v = |s: &str| s.to_string();
     match venc.vendor {
-        Vendor::Nvenc => vec![v("-c:v"), name, v("-preset"), v("p6"), v("-rc"), v("vbr"), v("-b:v"), vb, v("-maxrate"), mx, v("-bufsize"), bf, v("-multipass"), v("fullres")],
+        Vendor::Nvenc => vec![
+            v("-c:v"),
+            name,
+            v("-preset"),
+            v("p6"),
+            v("-rc"),
+            v("vbr"),
+            v("-b:v"),
+            vb,
+            v("-maxrate"),
+            mx,
+            v("-bufsize"),
+            bf,
+            v("-multipass"),
+            v("fullres"),
+        ],
         Vendor::Qsv => vec![v("-c:v"), name, v("-b:v"), vb, v("-maxrate"), mx],
-        Vendor::Amf => vec![v("-c:v"), name, v("-rc"), v("vbr_peak"), v("-b:v"), vb, v("-maxrate"), mx],
+        Vendor::Amf => vec![
+            v("-c:v"),
+            name,
+            v("-rc"),
+            v("vbr_peak"),
+            v("-b:v"),
+            vb,
+            v("-maxrate"),
+            mx,
+        ],
         Vendor::Cpu => vec![],
     }
 }
@@ -225,13 +362,13 @@ struct FfmpegStatus {
 // thread pool - sync Tauri commands run on the MAIN thread and freeze the UI.
 #[tauri::command]
 async fn check_ffmpeg(state: State<'_, AppState>) -> Result<FfmpegStatus, String> {
-    let path = on_path("ffmpeg");
     let (m, p) = locate_tools();
+    let from_path = m.as_deref() == Some(Path::new("ffmpeg"));
     *state.ffmpeg.lock().unwrap() = m.clone();
     *state.ffprobe.lock().unwrap() = p;
     Ok(FfmpegStatus {
         present: m.is_some(),
-        on_path: path.is_some(),
+        on_path: from_path,
         ffmpeg: m.map(|p| p.to_string_lossy().to_string()),
     })
 }
@@ -240,7 +377,10 @@ async fn check_ffmpeg(state: State<'_, AppState>) -> Result<FfmpegStatus, String
 fn download_ffmpeg(app: AppHandle) {
     std::thread::spawn(move || {
         if let Err(e) = do_download(&app) {
-            let _ = app.emit("setup", serde_json::json!({ "stage": "error", "message": e }));
+            let _ = app.emit(
+                "setup",
+                serde_json::json!({ "stage": "error", "message": e }),
+            );
         }
     });
 }
@@ -267,7 +407,7 @@ fn do_download(app: &AppHandle) -> Result<(), String> {
     }
     let total = resp.content_length().unwrap_or(0);
 
-    let tmp = std::env::temp_dir().join("meowverter_ffmpeg.zip");
+    let tmp = temp_path("meowverter_ffmpeg", "zip");
     let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
     let mut buf = [0u8; 1 << 16];
     let mut done: u64 = 0;
@@ -350,14 +490,18 @@ fn latest_ffmpeg_marker() -> Result<String, String> {
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     if let Some(assets) = v.get("assets").and_then(|a| a.as_array()) {
         for a in assets {
-            if a.get("name").and_then(|n| n.as_str()) == Some("ffmpeg-master-latest-win64-gpl.zip") {
+            if a.get("name").and_then(|n| n.as_str()) == Some("ffmpeg-master-latest-win64-gpl.zip")
+            {
                 if let Some(u) = a.get("updated_at").and_then(|x| x.as_str()) {
                     return Ok(u.to_string());
                 }
             }
         }
     }
-    Ok(v.get("published_at").and_then(|x| x.as_str()).unwrap_or("").to_string())
+    Ok(v.get("published_at")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string())
 }
 
 fn marker_path() -> PathBuf {
@@ -381,10 +525,18 @@ async fn check_ffmpeg_update() -> Result<UpdateInfo, String> {
     if stored.is_empty() {
         // pre-installed / first run: adopt the current build as the baseline, don't nag
         let _ = std::fs::write(marker_path(), &latest);
-        return Ok(UpdateInfo { available: false, current: latest.clone(), latest });
+        return Ok(UpdateInfo {
+            available: false,
+            current: latest.clone(),
+            latest,
+        });
     }
     let available = !latest.is_empty() && latest != stored;
-    Ok(UpdateInfo { available, current: stored, latest })
+    Ok(UpdateInfo {
+        available,
+        current: stored,
+        latest,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -437,8 +589,7 @@ async fn probe(state: State<'_, AppState>, path: String) -> Result<MediaInfo, St
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let v: serde_json::Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
 
     let mut info = MediaInfo {
         duration: 0.0,
@@ -600,7 +751,7 @@ async fn estimate_gif(state: State<'_, AppState>, opts: GifEstOpts) -> Result<u6
         q => q.parse::<i32>().unwrap_or(360).min(480),
     };
     let vf = gif_vf(fps, h, opts.gif_quality);
-    let tmp = std::env::temp_dir().join("meowverter_gifest.gif");
+    let tmp = temp_path("meowverter_gifest", "gif");
     let _ = std::fs::remove_file(&tmp);
     let out = new_cmd(&ff)
         .args([
@@ -666,8 +817,14 @@ async fn vmaf(state: State<'_, AppState>, opts: VmafOpts) -> Result<f64, String>
     // output dimensions - reference is scaled to match so VMAF can compare frame-for-frame
     let dout = new_cmd(&fp)
         .args([
-            "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height", "-of", "csv=p=0",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
         ])
         .arg(&opts.distorted)
         .stderr(Stdio::null())
@@ -680,14 +837,31 @@ async fn vmaf(state: State<'_, AppState>, opts: VmafOpts) -> Result<f64, String>
     if w == 0 || h == 0 {
         return Err("couldn't read output dimensions".into());
     }
-    let sample = if opts.seconds > 0.0 { opts.seconds } else { 20.0 };
+    let sample = if opts.seconds > 0.0 {
+        opts.seconds
+    } else {
+        20.0
+    };
     let lavfi = format!(
         "[0:v]setpts=PTS-STARTPTS[d];[1:v]scale={w}:{h}:flags=bicubic,setpts=PTS-STARTPTS[r];[d][r]libvmaf=n_threads=16"
     );
     let out = new_cmd(&ff)
-        .args(["-hide_banner", "-ss", "0", "-t", &format!("{sample:.3}"), "-i"])
+        .args([
+            "-hide_banner",
+            "-ss",
+            "0",
+            "-t",
+            &format!("{sample:.3}"),
+            "-i",
+        ])
         .arg(&opts.distorted)
-        .args(["-ss", &format!("{:.3}", opts.ref_start.max(0.0)), "-t", &format!("{sample:.3}"), "-i"])
+        .args([
+            "-ss",
+            &format!("{:.3}", opts.ref_start.max(0.0)),
+            "-t",
+            &format!("{sample:.3}"),
+            "-i",
+        ])
         .arg(&opts.reference)
         .args(["-lavfi", &lavfi, "-f", "null", "-"])
         .stdin(Stdio::null())
@@ -745,7 +919,7 @@ struct ConvertOpts {
 struct Codec {
     venc: &'static str,
     aenc: &'static str,
-    pix: bool,    // force yuv420p
+    pix: bool, // force yuv420p
     faststart: bool,
     pass_fmt: &'static str,
     extra: Vec<&'static str>,
@@ -857,7 +1031,11 @@ fn scale_filter_named(res: &str, name: &str) -> Option<String> {
 }
 
 /// Build one or more passes (each a full ffmpeg arg vector).
-fn build_passes(o: &ConvertOpts, venc: VideoEnc, gpu_decode: bool) -> Result<Vec<Vec<String>>, String> {
+fn build_passes(
+    o: &ConvertOpts,
+    venc: VideoEnc,
+    gpu_decode: bool,
+) -> Result<Vec<Vec<String>>, String> {
     let progress = ["-progress", "pipe:1", "-nostats"];
 
     match o.mode.as_str() {
@@ -870,7 +1048,11 @@ fn build_passes(o: &ConvertOpts, venc: VideoEnc, gpu_decode: bool) -> Result<Vec
                     a.push("pcm_s16le".into());
                 }
                 "m4a" => {
-                    a.extend(["-c:a", "aac", "-b:a", "192k"].iter().map(|s| s.to_string()));
+                    a.extend(
+                        ["-c:a", "aac", "-b:a", "192k"]
+                            .iter()
+                            .map(|s| s.to_string()),
+                    );
                 }
                 _ => {
                     a.extend(
@@ -924,7 +1106,11 @@ fn build_passes(o: &ConvertOpts, venc: VideoEnc, gpu_decode: bool) -> Result<Vec
                 if hw {
                     // single-pass hardware VBR to the target bitrate
                     let mut a = input_args(o, use_cuda);
-                    let sc = if use_cuda { scale_filter_named(&o.resolution, "scale_cuda") } else { vf.clone() };
+                    let sc = if use_cuda {
+                        scale_filter_named(&o.resolution, "scale_cuda")
+                    } else {
+                        vf.clone()
+                    };
                     if let Some(f) = &sc {
                         a.push("-vf".into());
                         a.push(f.clone());
@@ -954,9 +1140,17 @@ fn build_passes(o: &ConvertOpts, venc: VideoEnc, gpu_decode: bool) -> Result<Vec
                         a.push("-vf".into());
                         a.push(f.clone());
                     }
-                    a.extend(["-c:v", "libsvtav1", "-preset", "8", "-b:v"].iter().map(|s| s.to_string()));
+                    a.extend(
+                        ["-c:v", "libsvtav1", "-preset", "8", "-b:v"]
+                            .iter()
+                            .map(|s| s.to_string()),
+                    );
                     a.push(vb);
-                    a.extend(["-pix_fmt", "yuv420p", "-c:a"].iter().map(|s| s.to_string()));
+                    a.extend(
+                        ["-pix_fmt", "yuv420p", "-c:a"]
+                            .iter()
+                            .map(|s| s.to_string()),
+                    );
                     a.push(c.aenc.into());
                     a.push("-b:a".into());
                     a.push(format!("{}k", audio_kbps as i64));
@@ -966,7 +1160,8 @@ fn build_passes(o: &ConvertOpts, venc: VideoEnc, gpu_decode: bool) -> Result<Vec
                     return Ok(vec![a]);
                 }
 
-                let log = std::env::temp_dir().join("meowverter_pass");
+                let log =
+                    std::env::temp_dir().join(format!("meowverter_pass_{}", std::process::id()));
                 let logf = log.to_string_lossy().to_string();
 
                 let mut p1 = input_args(o, false);
@@ -979,11 +1174,7 @@ fn build_passes(o: &ConvertOpts, venc: VideoEnc, gpu_decode: bool) -> Result<Vec
                 p1.push("-b:v".into());
                 p1.push(vb.clone());
                 p1.extend(c.extra.iter().map(|s| s.to_string()));
-                p1.extend(
-                    ["-pass", "1", "-passlogfile"]
-                        .iter()
-                        .map(|s| s.to_string()),
-                );
+                p1.extend(["-pass", "1", "-passlogfile"].iter().map(|s| s.to_string()));
                 p1.push(logf.clone());
                 p1.push("-an".into());
                 p1.push("-f".into());
@@ -1005,11 +1196,7 @@ fn build_passes(o: &ConvertOpts, venc: VideoEnc, gpu_decode: bool) -> Result<Vec
                     p2.push("yuv420p".into());
                 }
                 p2.extend(c.extra.iter().map(|s| s.to_string()));
-                p2.extend(
-                    ["-pass", "2", "-passlogfile"]
-                        .iter()
-                        .map(|s| s.to_string()),
-                );
+                p2.extend(["-pass", "2", "-passlogfile"].iter().map(|s| s.to_string()));
                 p2.push(logf);
                 p2.push("-c:a".into());
                 p2.push(c.aenc.into());
@@ -1027,7 +1214,11 @@ fn build_passes(o: &ConvertOpts, venc: VideoEnc, gpu_decode: bool) -> Result<Vec
                 if hw {
                     // hardware constant-quality encode
                     let mut a = input_args(o, use_cuda);
-                    let sc = if use_cuda { scale_filter_named(&o.resolution, "scale_cuda") } else { vf.clone() };
+                    let sc = if use_cuda {
+                        scale_filter_named(&o.resolution, "scale_cuda")
+                    } else {
+                        vf.clone()
+                    };
                     if let Some(f) = &sc {
                         a.push("-vf".into());
                         a.push(f.clone());
@@ -1075,7 +1266,11 @@ fn build_passes(o: &ConvertOpts, venc: VideoEnc, gpu_decode: bool) -> Result<Vec
                 a.push("-c:a".into());
                 a.push(c.aenc.into());
                 a.push("-b:a".into());
-                a.push(if c.aenc == "libopus" { "128k".into() } else { "160k".into() });
+                a.push(if c.aenc == "libopus" {
+                    "128k".into()
+                } else {
+                    "160k".into()
+                });
                 if c.faststart {
                     a.push("-movflags".into());
                     a.push("+faststart".into());
@@ -1096,10 +1291,46 @@ fn cancel_convert(state: State<AppState>) {
     }
 }
 
+fn available_output_path(requested: &str) -> String {
+    let path = Path::new(requested);
+    if !path.exists() {
+        return requested.to_string();
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    for n in 2..10_000 {
+        let name = if ext.is_empty() {
+            format!("{stem}_{n}")
+        } else {
+            format!("{stem}_{n}.{ext}")
+        };
+        let candidate = parent.join(name);
+        if !candidate.exists() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+    requested.to_string()
+}
+
+fn remove_partial_output(opts: &ConvertOpts) {
+    let _ = std::fs::remove_file(&opts.output);
+}
+
 #[tauri::command]
-async fn start_convert(app: AppHandle, state: State<'_, AppState>, opts: ConvertOpts) -> Result<(), String> {
+async fn start_convert(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mut opts: ConvertOpts,
+) -> Result<(), String> {
     let ffmpeg = stored_ffmpeg(&state)?;
-    *state.cancel.lock().unwrap() = false;
+    if Path::new(&opts.input) == Path::new(&opts.output) {
+        return Err("The output file must be different from the original.".into());
+    }
+    opts.output = available_output_path(&opts.output);
     let dur = opts.total_duration.max(0.1);
 
     // Pick the fastest working encoder for this machine, with a fallback chain:
@@ -1119,46 +1350,82 @@ async fn start_convert(app: AppHandle, state: State<'_, AppState>, opts: Convert
 
     // validate the first attempt builds before spawning
     build_passes(&opts, attempts[0].0, attempts[0].1)?;
+    claim_job(&state)?;
+    *state.cancel.lock().unwrap() = false;
 
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
+        let _active_job = ActiveJob(&state);
         let mut attempt = 0;
         loop {
             let (venc, gpu_decode) = attempts[attempt];
             let passes = match build_passes(&opts, venc, gpu_decode) {
                 Ok(p) => p,
-                Err(e) => { let _ = app.emit("convert", serde_json::json!({ "stage": "error", "message": e })); return; }
+                Err(e) => {
+                    remove_partial_output(&opts);
+                    let _ = app.emit(
+                        "convert",
+                        serde_json::json!({ "stage": "error", "message": e }),
+                    );
+                    return;
+                }
             };
             let mut idx = 0;
             let mut retry = false;
             while idx < passes.len() {
                 if *state.cancel.lock().unwrap() {
+                    remove_partial_output(&opts);
                     let _ = app.emit("convert", serde_json::json!({ "stage": "cancelled" }));
                     return;
                 }
                 match run_pass(&app, &state, &ffmpeg, &passes[idx], dur, idx, passes.len()) {
-                    Ok(true) => { idx += 1; } // finished this pass
+                    Ok(true) => {
+                        idx += 1;
+                    } // finished this pass
                     Ok(false) => {
+                        remove_partial_output(&opts);
                         let _ = app.emit("convert", serde_json::json!({ "stage": "cancelled" }));
                         return;
                     }
                     Err(e) => {
                         // a hardware encoder that isn't truly usable fails here ->
                         // step down to the next attempt (which ends at the CPU encoder)
-                        if idx == 0 && attempt + 1 < attempts.len() && !*state.cancel.lock().unwrap() {
+                        if idx == 0
+                            && attempt + 1 < attempts.len()
+                            && !*state.cancel.lock().unwrap()
+                        {
                             attempt += 1;
                             retry = true;
                             break;
                         }
-                        let _ = app.emit("convert", serde_json::json!({ "stage": "error", "message": e }));
+                        remove_partial_output(&opts);
+                        let _ = app.emit(
+                            "convert",
+                            serde_json::json!({ "stage": "error", "message": e }),
+                        );
                         return;
                     }
                 }
             }
-            if retry { continue; }
+            if retry {
+                continue;
+            }
             break;
         }
-        let out_size = std::fs::metadata(&opts.output).map(|m| m.len()).unwrap_or(0);
+        let out_size = std::fs::metadata(&opts.output)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if out_size == 0 {
+            remove_partial_output(&opts);
+            let _ = app.emit(
+                "convert",
+                serde_json::json!({
+                    "stage": "error",
+                    "message": "FFmpeg finished without creating a usable output file."
+                }),
+            );
+            return;
+        }
         let final_out = finish_delete_original(&opts, out_size);
         let _ = app.emit(
             "convert",
@@ -1194,12 +1461,7 @@ fn leaf(path: &str) -> String {
 
 fn notify(app: &AppHandle, title: &str, body: &str) {
     use tauri_plugin_notification::NotificationExt;
-    let _ = app
-        .notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show();
+    let _ = app.notification().builder().title(title).body(body).show();
 }
 
 /// Runs one ffmpeg pass, streaming progress. Ok(true)=done, Ok(false)=cancelled.
@@ -1230,7 +1492,14 @@ fn run_pass(
         let mut reader = BufReader::new(stderr);
         let mut s = String::new();
         let _ = reader.read_to_string(&mut s);
-        let tail: String = s.chars().rev().take(4000).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = s
+            .chars()
+            .rev()
+            .take(4000)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         *err_tail2.lock().unwrap() = tail;
     });
 
@@ -1309,8 +1578,8 @@ fn run_pass(
 // ---------------------------------------------------------------------------
 
 const MEDIA_EXTS: &[&str] = &[
-    "mp4", "mkv", "mov", "avi", "webm", "flv", "wmv", "m4v", "ts", "mpg", "mpeg",
-    "mp3", "wav", "flac", "aac", "ogg", "m4a", "gif",
+    "mp4", "mkv", "mov", "avi", "webm", "flv", "wmv", "m4v", "ts", "mpg", "mpeg", "mp3", "wav",
+    "flac", "aac", "ogg", "m4a", "gif",
 ];
 
 #[tauri::command]
@@ -1319,7 +1588,11 @@ async fn pick_inputs() -> Vec<String> {
         .add_filter("Media", MEDIA_EXTS)
         .add_filter("All files", &["*"])
         .pick_files()
-        .map(|v| v.into_iter().map(|p| p.to_string_lossy().to_string()).collect())
+        .map(|v| {
+            v.into_iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -1375,6 +1648,7 @@ fn ytdlp_path() -> Option<PathBuf> {
 fn http_download(url: &str, dest: &Path) -> Result<(), String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("Meowverter")
+        .timeout(Duration::from_secs(180))
         .build()
         .map_err(|e| e.to_string())?;
     let mut resp = client.get(url).send().map_err(|e| e.to_string())?;
@@ -1384,6 +1658,83 @@ fn http_download(url: &str, dest: &Path) -> Result<(), String> {
     let mut f = std::fs::File::create(dest).map_err(|e| e.to_string())?;
     std::io::copy(&mut resp, &mut f).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn install_ytdlp() -> Result<PathBuf, String> {
+    std::fs::create_dir_all(bin_dir()).map_err(|e| e.to_string())?;
+    let dest = bin_dir().join("yt-dlp.exe");
+    let tmp = temp_path("meowverter_ytdlp", "exe");
+    if let Err(e) = http_download(YTDLP_URL, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("couldn't download yt-dlp: {e}"));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &dest) {
+        if dest.exists() {
+            let _ = std::fs::remove_file(&tmp);
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("couldn't install yt-dlp: {e}"));
+        }
+    }
+    Ok(dest)
+}
+
+fn ensure_deno() -> Result<PathBuf, String> {
+    let dest = bin_dir().join("deno.exe");
+    if dest.exists() {
+        return Ok(dest);
+    }
+    std::fs::create_dir_all(bin_dir()).map_err(|e| e.to_string())?;
+    let archive_path = temp_path("meowverter_deno", "zip");
+    if let Err(e) = http_download(DENO_URL, &archive_path) {
+        let _ = std::fs::remove_file(&archive_path);
+        return Err(format!("couldn't download the YouTube runtime: {e}"));
+    }
+
+    let extracted = temp_path("meowverter_deno", "exe");
+    let result = (|| -> Result<(), String> {
+        let file = std::fs::File::open(&archive_path).map_err(|e| e.to_string())?;
+        let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        let mut found = false;
+        for i in 0..zip.len() {
+            let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
+            let name = entry.name().replace('\\', "/");
+            if name == "deno.exe" || name.ends_with("/deno.exe") {
+                let mut out = std::fs::File::create(&extracted).map_err(|e| e.to_string())?;
+                std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err("deno.exe wasn't present in its download".into());
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&archive_path);
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&extracted);
+        return Err(format!("couldn't install the YouTube runtime: {e}"));
+    }
+    if let Err(e) = std::fs::rename(&extracted, &dest) {
+        if dest.exists() {
+            let _ = std::fs::remove_file(&extracted);
+        } else {
+            let _ = std::fs::remove_file(&extracted);
+            return Err(format!("couldn't install the YouTube runtime: {e}"));
+        }
+    }
+    Ok(dest)
+}
+
+fn ensure_download_tools(state: &AppState) -> Result<PathBuf, String> {
+    let _setup = state.tool_setup.lock().unwrap();
+    let yt = match ytdlp_path() {
+        Some(path) => path,
+        None => install_ytdlp()?,
+    };
+    ensure_deno()?;
+    Ok(yt)
 }
 
 fn parse_percent(line: &str) -> Option<f64> {
@@ -1502,7 +1853,8 @@ struct MusicResolved {
 
 // Streaming pages serve a metadata-less JS stub to browser UAs but the full
 // server-rendered page (with og: tags) to link-preview crawlers.
-const CRAWLER_UA: &str = "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)";
+const CRAWLER_UA: &str =
+    "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)";
 
 fn http_text(url: &str) -> Result<String, String> {
     reqwest::blocking::Client::builder()
@@ -1519,7 +1871,11 @@ fn http_text(url: &str) -> Result<String, String> {
 fn deezer_track_id(url: &str) -> Option<String> {
     let after = url.split("/track/").nth(1)?;
     let id: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if id.is_empty() { None } else { Some(id) }
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
 }
 
 /// Streaming audio (Spotify, Apple Music, Tidal, Deezer) is DRM-locked and can't
@@ -1527,7 +1883,7 @@ fn deezer_track_id(url: &str) -> Option<String> {
 /// (no login involved) and find the same song on YouTube, which the downloader
 /// then grabs. Returns the matching YouTube URL + display info.
 #[tauri::command]
-async fn resolve_music(url: String) -> Result<MusicResolved, String> {
+async fn resolve_music(state: State<'_, AppState>, url: String) -> Result<MusicResolved, String> {
     let u = url.to_lowercase();
 
     // 1) build a "artist track" search query + a clean display title + cover art
@@ -1536,10 +1892,28 @@ async fn resolve_music(url: String) -> Result<MusicResolved, String> {
         let id = deezer_track_id(&url).ok_or("Couldn't read that Deezer link.")?;
         let body = http_text(&format!("https://api.deezer.com/track/{id}"))?;
         let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-        let track = v.get("title").and_then(|x| x.as_str()).ok_or("Couldn't read that Deezer link.")?.to_string();
-        let artist = v.get("artist").and_then(|a| a.get("name")).and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let thumb = v.get("album").and_then(|a| a.get("cover_medium")).and_then(|x| x.as_str()).unwrap_or("").to_string();
-        (format!("{artist} {track}"), format!("{artist} - {track}"), thumb)
+        let track = v
+            .get("title")
+            .and_then(|x| x.as_str())
+            .ok_or("Couldn't read that Deezer link.")?
+            .to_string();
+        let artist = v
+            .get("artist")
+            .and_then(|a| a.get("name"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let thumb = v
+            .get("album")
+            .and_then(|a| a.get("cover_medium"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        (
+            format!("{artist} {track}"),
+            format!("{artist} - {track}"),
+            thumb,
+        )
     } else {
         // scrape the og: tags (Spotify / Apple Music / Tidal)
         let html = http_text(&url)?;
@@ -1548,9 +1922,17 @@ async fn resolve_music(url: String) -> Result<MusicResolved, String> {
         if u.contains("music.apple.com") {
             // og:title = "Track by Artist on Apple Music" (note: nbsp between Apple & Music,
             // so split on " on Apple" to be safe)
-            let core = og_title.split(" on Apple").next().unwrap_or(og_title.as_str()).trim();
+            let core = og_title
+                .split(" on Apple")
+                .next()
+                .unwrap_or(og_title.as_str())
+                .trim();
             match core.rsplit_once(" by ") {
-                Some((track, artist)) => (format!("{artist} {track}"), format!("{artist} - {track}"), thumb),
+                Some((track, artist)) => (
+                    format!("{artist} {track}"),
+                    format!("{artist} - {track}"),
+                    thumb,
+                ),
                 None => (core.to_string(), core.to_string(), thumb),
             }
         } else if u.contains("tidal.com") {
@@ -1563,17 +1945,32 @@ async fn resolve_music(url: String) -> Result<MusicResolved, String> {
             if artist.is_empty() {
                 (og_title.clone(), og_title, thumb)
             } else {
-                (format!("{artist} {og_title}"), format!("{artist} - {og_title}"), thumb)
+                (
+                    format!("{artist} {og_title}"),
+                    format!("{artist} - {og_title}"),
+                    thumb,
+                )
             }
         }
     };
 
     // 2) find the best match on YouTube
-    let yt = ytdlp_path().ok_or("yt-dlp isn't installed yet.")?;
+    let yt = ensure_download_tools(&state)?;
     let bin = bin_dir();
-    let path_env = format!("{};{}", bin.to_string_lossy(), std::env::var("PATH").unwrap_or_default());
+    let path_env = format!(
+        "{};{}",
+        bin.to_string_lossy(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let out = new_cmd(&yt)
-        .args(["--no-warnings", "--no-playlist", "--print", "%(webpage_url)s", "--print", "%(duration)s"])
+        .args([
+            "--no-warnings",
+            "--no-playlist",
+            "--print",
+            "%(webpage_url)s",
+            "--print",
+            "%(duration)s",
+        ])
         .arg(format!("ytsearch1:{query}"))
         .env("PATH", path_env)
         .stdin(Stdio::null())
@@ -1587,16 +1984,24 @@ async fn resolve_music(url: String) -> Result<MusicResolved, String> {
     let s = String::from_utf8_lossy(&out.stdout);
     let mut lines = s.lines().filter(|l| !l.trim().is_empty());
     let youtube_url = lines.next().unwrap_or("").trim().to_string();
-    let duration = lines.next().and_then(|d| d.trim().parse::<f64>().ok()).unwrap_or(0.0);
+    let duration = lines
+        .next()
+        .and_then(|d| d.trim().parse::<f64>().ok())
+        .unwrap_or(0.0);
     if youtube_url.is_empty() {
         return Err("Couldn't find that song to download.".into());
     }
-    Ok(MusicResolved { youtube_url, title, thumbnail, duration })
+    Ok(MusicResolved {
+        youtube_url,
+        title,
+        thumbnail,
+        duration,
+    })
 }
 
 #[tauri::command]
-async fn youtube_info(url: String) -> Result<YtInfo, String> {
-    let yt = ytdlp_path().ok_or("yt-dlp isn't installed yet.")?;
+async fn youtube_info(state: State<'_, AppState>, url: String) -> Result<YtInfo, String> {
+    let yt = ensure_download_tools(&state)?;
     let bin = bin_dir();
     let path_env = format!(
         "{};{}",
@@ -1623,7 +2028,11 @@ async fn youtube_info(url: String) -> Result<YtInfo, String> {
     }
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
     Ok(YtInfo {
-        title: v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        title: v
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
         duration: v.get("duration").and_then(|x| x.as_f64()).unwrap_or(0.0),
         thumbnail: v
             .get("thumbnail")
@@ -1647,8 +2056,8 @@ struct YtSizeOpts {
 /// Approx combined (video+audio) download size for the chosen quality, via a
 /// no-download yt-dlp simulate. Returns 0 if YouTube doesn't report a size.
 #[tauri::command]
-async fn youtube_size(opts: YtSizeOpts) -> Result<u64, String> {
-    let yt = ytdlp_path().ok_or("yt-dlp isn't installed yet.")?;
+async fn youtube_size(state: State<'_, AppState>, opts: YtSizeOpts) -> Result<u64, String> {
+    let yt = ensure_download_tools(&state)?;
     let bin = bin_dir();
     let path_env = format!(
         "{};{}",
@@ -1710,12 +2119,18 @@ struct YtDownloadOpts {
 }
 
 #[tauri::command]
-fn download_youtube(app: AppHandle, opts: YtDownloadOpts) {
+fn download_youtube(app: AppHandle, opts: YtDownloadOpts) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    claim_job(&state)?;
+    *state.cancel.lock().unwrap() = false;
     std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let _active_job = ActiveJob(&state);
         if let Err(e) = do_youtube(&app, &opts) {
             let _ = app.emit("yt", serde_json::json!({ "stage": "error", "message": e }));
         }
     });
+    Ok(())
 }
 
 fn do_youtube(app: &AppHandle, opts: &YtDownloadOpts) -> Result<(), String> {
@@ -1725,27 +2140,18 @@ fn do_youtube(app: &AppHandle, opts: &YtDownloadOpts) -> Result<(), String> {
         let _ = app.emit("yt", v);
     };
 
-    // ensure yt-dlp is available (download the single exe if missing)
-    let yt = match ytdlp_path() {
-        Some(p) => p,
-        None => {
-            emit(serde_json::json!({ "stage": "setup", "status": "Fetching the YouTube downloader…" }));
-            std::fs::create_dir_all(bin_dir()).ok();
-            let dest = bin_dir().join("yt-dlp.exe");
-            http_download(
-                "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
-                &dest,
-            )?;
-            dest
-        }
-    };
+    let needs_setup = ytdlp_path().is_none() || !bin_dir().join("deno.exe").exists();
+    if needs_setup {
+        emit(serde_json::json!({ "stage": "setup", "status": "Setting up the downloader…" }));
+    }
+    let yt = ensure_download_tools(&state)?;
 
     let bin = bin_dir();
     let out_dir = dirs::download_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_else(std::env::temp_dir);
     std::fs::create_dir_all(&out_dir).ok();
-    let pathfile = std::env::temp_dir().join("meowverter_ytpath.txt");
+    let pathfile = temp_path("meowverter_ytpath", "txt");
     let _ = std::fs::remove_file(&pathfile);
 
     let mut args: Vec<String> = vec![
@@ -1769,7 +2175,10 @@ fn do_youtube(app: &AppHandle, opts: &YtDownloadOpts) -> Result<(), String> {
         // cap the title at 120 bytes: some sites (Facebook especially) use the
         // whole video description as the "title", which blows past Windows' 260
         // char path limit and the download fails to write
-        format!("{}\\%(title).120B [%(id)s].%(ext)s", out_dir.to_string_lossy()),
+        format!(
+            "{}\\%(title).120B [%(id)s].%(ext)s",
+            out_dir.to_string_lossy()
+        ),
         "--trim-filenames".into(), // extra safety for deep download folders
         "200".into(),
     ];
@@ -1800,8 +2209,6 @@ fn do_youtube(app: &AppHandle, opts: &YtDownloadOpts) -> Result<(), String> {
         }
     }
 
-    *state.cancel.lock().unwrap() = false;
-
     // put our bin on PATH so yt-dlp finds deno (JS runtime) + ffmpeg
     let path_env = format!(
         "{};{}",
@@ -1825,7 +2232,14 @@ fn do_youtube(app: &AppHandle, opts: &YtDownloadOpts) -> Result<(), String> {
     let err_thread = std::thread::spawn(move || {
         let mut s = String::new();
         let _ = BufReader::new(stderr).read_to_string(&mut s);
-        let tail: String = s.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = s
+            .chars()
+            .rev()
+            .take(2000)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         *et2.lock().unwrap() = tail;
     });
 
@@ -1865,7 +2279,9 @@ fn do_youtube(app: &AppHandle, opts: &YtDownloadOpts) -> Result<(), String> {
             || line.contains("[ExtractAudio]")
             || line.contains("[VideoConvertor]")
         {
-            emit(serde_json::json!({ "stage": "progress", "percent": 99.0, "status": "Finishing up…" }));
+            emit(
+                serde_json::json!({ "stage": "progress", "percent": 99.0, "status": "Finishing up…" }),
+            );
         }
     }
 
@@ -2009,7 +2425,10 @@ fn main() {
         .setup(|app| {
             // keep yt-dlp fresh (YouTube regularly breaks older versions) -
             // silent self-update in the background, at most every 3 days
-            std::thread::spawn(|| {
+            let tool_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let state = tool_handle.state::<AppState>();
+                let _setup = state.tool_setup.lock().unwrap();
                 let yt = bin_dir().join("yt-dlp.exe");
                 if !yt.exists() {
                     return;
@@ -2026,13 +2445,17 @@ fn main() {
                 if now.saturating_sub(last) < 3 * 24 * 3600 {
                     return;
                 }
-                let _ = new_cmd(&yt)
+                let updated = new_cmd(&yt)
                     .arg("-U")
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
-                    .status();
-                let _ = std::fs::write(&marker, now.to_string());
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if updated {
+                    let _ = std::fs::write(&marker, now.to_string());
+                }
             });
 
             // forward dropped files to the UI as a "dropped" event
@@ -2043,8 +2466,10 @@ fn main() {
                         paths, ..
                     }) = ev
                     {
-                        let list: Vec<String> =
-                            paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
+                        let list: Vec<String> = paths
+                            .iter()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .collect();
                         if !list.is_empty() {
                             let _ = handle.emit("dropped", list);
                         }
@@ -2075,7 +2500,10 @@ mod tests {
                 "totalDuration":3.5}"#,
         );
         // these are the fields that were silently defaulting before the rename_all fix
-        assert_eq!(o.total_duration, 3.5, "totalDuration must reach total_duration");
+        assert_eq!(
+            o.total_duration, 3.5,
+            "totalDuration must reach total_duration"
+        );
         assert_eq!(o.target_size_mb, Some(25.0));
         assert_eq!(o.trim_start, Some(2.0));
         assert_eq!(o.trim_end, Some(5.0));
@@ -2088,7 +2516,13 @@ mod tests {
             r#"{"input":"a.mp4","output":"b.mp4","mode":"video","resolution":"source",
                 "format":"mp4_h264","quality":"balanced","targetSizeMb":10.0,"totalDuration":60.0}"#,
         );
-        assert_eq!(build_passes(&o, cpu_encoder("mp4_h264"), false).unwrap().len(), 2, "compress-to-size = two passes");
+        assert_eq!(
+            build_passes(&o, cpu_encoder("mp4_h264"), false)
+                .unwrap()
+                .len(),
+            2,
+            "compress-to-size = two passes"
+        );
     }
 
     #[test]
@@ -2097,7 +2531,12 @@ mod tests {
             r#"{"input":"a.mp4","output":"b.mp4","mode":"video","resolution":"1080",
                 "format":"mp4_h264","quality":"high","totalDuration":60.0}"#,
         );
-        assert_eq!(build_passes(&o, cpu_encoder("mp4_h264"), false).unwrap().len(), 1);
+        assert_eq!(
+            build_passes(&o, cpu_encoder("mp4_h264"), false)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -2127,8 +2566,15 @@ mod tests {
         ));
         let final_out = finish_delete_original(&o, 9);
         assert!(!input.exists(), "original should be recycled");
-        assert_eq!(final_out, output.to_string_lossy(), "output keeps its _Meowverter name");
-        assert!(output.exists(), "converted file should still be there, marked");
+        assert_eq!(
+            final_out,
+            output.to_string_lossy(),
+            "output keeps its _Meowverter name"
+        );
+        assert!(
+            output.exists(),
+            "converted file should still be there, marked"
+        );
         let _ = std::fs::remove_file(&output);
     }
 
@@ -2138,13 +2584,20 @@ mod tests {
             r#"{"input":"a.mp4","output":"b.mp4","mode":"video","resolution":"1080",
                 "format":"mp4_h265","quality":"balanced","totalDuration":60.0}"#,
         );
-        let nv = VideoEnc { vendor: Vendor::Nvenc, name: "hevc_nvenc", family: Family::Hevc };
+        let nv = VideoEnc {
+            vendor: Vendor::Nvenc,
+            name: "hevc_nvenc",
+            family: Family::Hevc,
+        };
         // full-GPU pipeline: hwaccel + scale_cuda + nvenc, frames stay on GPU (no pix_fmt)
         let g = &build_passes(&o, nv, true).unwrap()[0];
         assert!(g.iter().any(|x| x == "-hwaccel"));
         assert!(g.iter().any(|x| x.contains("scale_cuda")));
         assert!(g.iter().any(|x| x == "hevc_nvenc"));
-        assert!(!g.iter().any(|x| x == "yuv420p"), "gpu path must not force pix_fmt");
+        assert!(
+            !g.iter().any(|x| x == "yuv420p"),
+            "gpu path must not force pix_fmt"
+        );
         // CPU-decode fallback: no hwaccel, CPU scale, pix_fmt yuv420p
         let c = &build_passes(&o, nv, false).unwrap()[0];
         assert!(!c.iter().any(|x| x == "-hwaccel"));
@@ -2160,12 +2613,30 @@ mod tests {
                 "format":"mp4_h265","quality":"balanced","totalDuration":60.0}"#,
         );
         // Intel QSV -> global_quality, keeps the hevc tag
-        let qsv = &build_passes(&o, VideoEnc { vendor: Vendor::Qsv, name: "hevc_qsv", family: Family::Hevc }, false).unwrap()[0];
+        let qsv = &build_passes(
+            &o,
+            VideoEnc {
+                vendor: Vendor::Qsv,
+                name: "hevc_qsv",
+                family: Family::Hevc,
+            },
+            false,
+        )
+        .unwrap()[0];
         assert!(qsv.iter().any(|x| x == "hevc_qsv"));
         assert!(qsv.iter().any(|x| x == "-global_quality"));
         assert!(qsv.iter().any(|x| x == "hvc1"));
         // AMD AMF -> constant QP
-        let amf = &build_passes(&o, VideoEnc { vendor: Vendor::Amf, name: "hevc_amf", family: Family::Hevc }, false).unwrap()[0];
+        let amf = &build_passes(
+            &o,
+            VideoEnc {
+                vendor: Vendor::Amf,
+                name: "hevc_amf",
+                family: Family::Hevc,
+            },
+            false,
+        )
+        .unwrap()[0];
         assert!(amf.iter().any(|x| x == "hevc_amf"));
         assert!(amf.iter().any(|x| x == "-qp_p"));
         // AV1 in mp4: nvenc -> av1_nvenc + cq, no hevc tag
@@ -2173,7 +2644,16 @@ mod tests {
             r#"{"input":"a.mp4","output":"b.mp4","mode":"video","resolution":"source",
                 "format":"mp4_av1","quality":"balanced","totalDuration":60.0}"#,
         );
-        let nav = &build_passes(&oav, VideoEnc { vendor: Vendor::Nvenc, name: "av1_nvenc", family: Family::Av1 }, false).unwrap()[0];
+        let nav = &build_passes(
+            &oav,
+            VideoEnc {
+                vendor: Vendor::Nvenc,
+                name: "av1_nvenc",
+                family: Family::Av1,
+            },
+            false,
+        )
+        .unwrap()[0];
         assert!(nav.iter().any(|x| x == "av1_nvenc"));
         assert!(nav.iter().any(|x| x == "-cq"));
         assert!(!nav.iter().any(|x| x == "hvc1"), "av1 has no hevc tag");
@@ -2181,5 +2661,20 @@ mod tests {
         let cav = &build_passes(&oav, cpu_encoder("mp4_av1"), false).unwrap()[0];
         assert!(cav.iter().any(|x| x == "libsvtav1"));
         assert!(cav.iter().any(|x| x == "-crf"));
+    }
+
+    #[test]
+    fn existing_output_gets_a_unique_name() {
+        let dir = temp_path("meowverter_collision_test", "");
+        std::fs::create_dir_all(&dir).unwrap();
+        let existing = dir.join("clip_Meowverter.mp4");
+        std::fs::write(&existing, b"keep me").unwrap();
+
+        let picked = available_output_path(existing.to_str().unwrap());
+        assert!(picked.ends_with("clip_Meowverter_2.mp4"));
+        assert_eq!(std::fs::read(&existing).unwrap(), b"keep me");
+
+        let _ = std::fs::remove_file(&existing);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

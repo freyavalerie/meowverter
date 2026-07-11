@@ -12,8 +12,19 @@
   to { --hue: 360; }
 }
 
-/* pause all the looping RGB animations when the window isn't focused (idle GPU savings) */
-.anim-paused, .anim-paused *, .anim-paused *::before, .anim-paused *::after {
+/* Pause only looping effects while unfocused. One-shot entrance animations
+   must keep running or native drag/drop can strand content at opacity: 0. */
+.anim-paused,
+.anim-paused .ff-badge.update .dot,
+.anim-paused .app-update-pill::before,
+.anim-paused .chips .chip-loading,
+.anim-paused .mode-glow::before,
+.anim-paused .pill.active::before,
+.anim-paused .trim-toggle.active::before,
+.anim-paused .upload-prompt:hover::before,
+.anim-paused.drag .upload-prompt::before,
+.anim-paused .convert::before,
+.anim-paused .convert::after {
   animation-play-state: paused !important;
 }
 
@@ -175,6 +186,15 @@ main { flex: 1; overflow-y: auto; overflow-x: hidden; padding-right: 4px; displa
 .controls > *:nth-child(6) { animation-delay: .21s; }
 .controls > *:nth-child(n+7) { animation-delay: .25s; }
 .yt-info, .filecard, .upload-prompt, .batch-list { animation: rise .32s cubic-bezier(.22, .9, .32, 1) backwards; }
+/* A native Windows drop can briefly pause WebView2 animations on their first,
+   transparent frame. Keep dropped content visible until that transaction ends. */
+body.drop-settle .filecard,
+body.drop-settle .batch-list,
+body.drop-settle .controls > * {
+  animation: none !important;
+  opacity: 1 !important;
+  transform: none !important;
+}
 .mode-panel { display: flex; flex-direction: column; gap: 18px; }
 main::-webkit-scrollbar { width: 8px; }
 main::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8px; }

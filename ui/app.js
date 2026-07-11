@@ -135,9 +135,11 @@ const appWin = winMod ? winMod.getCurrentWindow() : null;
 // fewer/smaller resizes = no "blank flash" when files show up.
 const MINW = 760;
 let fitTimer, fitRaf = 0, fitWantResize = false, lastFitH = 0;
+let fitBusy = false, fitPending = false;
 function fitWindow(resize) {
   if (!appWin || !winMod) return;
   if (resize) fitWantResize = true;
+  if (fitBusy) { fitPending = true; return; }
   if (fitRaf) return;
   fitRaf = requestAnimationFrame(async () => {
     fitRaf = 0;
@@ -147,15 +149,23 @@ function fitWindow(resize) {
     const padB = parseFloat(getComputedStyle($("app")).paddingBottom) || 26;
     const needed = Math.ceil(main.offsetTop + main.scrollHeight + padB);
     if (needed === lastFitH) return; // height unchanged → no resize, no flash
+    fitBusy = true;
     try {
       await appWin.setMinSize(new winMod.LogicalSize(MINW, needed));
-      if (doResize) {
+      const needsGrow = doResize && window.innerHeight + 2 < needed;
+      if (needsGrow) {
         const curW = Math.max(MINW, Math.round(window.innerWidth));
         await appWin.setSize(new winMod.LogicalSize(curW, needed));
       }
       lastFitH = needed;
     } catch (e) {
       console.warn("fitWindow failed", e);
+    } finally {
+      fitBusy = false;
+      if (fitPending) {
+        fitPending = false;
+        fitWindow(false);
+      }
     }
   });
 }
@@ -226,6 +236,7 @@ const state = {
   output: null,
   userOutput: false,
 };
+let sourceGeneration = 0;
 
 // ---- ffmpeg availability + auto-update ---------------------
 let ffUpdating = false;
@@ -371,6 +382,7 @@ async function pickFile() {
   else loadQueue(paths);
 }
 async function loadFile(path) {
+  const generation = ++sourceGeneration;
   state.input = path;
   state.userOutput = false;
   state.batch = false;
@@ -393,12 +405,14 @@ async function loadFile(path) {
   try {
     info = await invoke("probe", { path });
   } catch (e) {
+    if (generation !== sourceGeneration || state.input !== path) return;
     alert("Couldn't read that file:\n" + e);
     state.input = null;
     updateControlsVisibility();
     fitWindow(true);
     return;
   }
+  if (generation !== sourceGeneration || state.input !== path) return;
   state.info = info;
   state.trimStart = 0;
   state.trimEnd = info.duration;
@@ -575,6 +589,7 @@ function scheduleThumb(which) {
     return;
   }
   if (!state.input || !(state.info && state.info.has_video)) return;
+  const source = state.input;
   const key = Math.round(t / thumbGrid) * thumbGrid;
   if (thumbCache.has(key)) {            // already grabbed → show instantly, no ffmpeg
     $("thumbView").src = thumbCache.get(key);
@@ -582,13 +597,14 @@ function scheduleThumb(which) {
     return;
   }
   clearTimeout(thumbTimer);
-  thumbTimer = setTimeout(() => loadThumb(key), 90);
+  thumbTimer = setTimeout(() => loadThumb(key, source), 90);
 }
-async function loadThumb(key) {
+async function loadThumb(key, source) {
+  if (source !== state.input) return;
   if (thumbCache.has(key)) { $("thumbView").src = thumbCache.get(key); return; }
   try {
-    const d = await invoke("thumbnail", { path: state.input, time: Math.max(0, key) });
-    if (d) { thumbCache.set(key, d); $("thumbView").src = d; }
+    const d = await invoke("thumbnail", { path: source, time: Math.max(0, key) });
+    if (d && source === state.input) { thumbCache.set(key, d); $("thumbView").src = d; }
   } catch (e) {
     /* a failed frame grab shouldn't break anything */
   }
@@ -731,18 +747,19 @@ const gifEstCache = new Map();
 function gifEstKey() {
   const dur = state.trimEnabled ? Math.max(0.1, state.trimEnd - state.trimStart) : (state.info ? state.info.duration : 0.1);
   const start = state.trimEnabled ? state.trimStart : 0;
-  return { key: `${state.resolution}|${state.fps}|${state.gifQuality}|${Math.round(start)}|${Math.round(dur)}`, start, dur };
+  const input = state.input;
+  return { key: `${input}|${state.resolution}|${state.fps}|${state.gifQuality}|${Math.round(start)}|${Math.round(dur)}`, input, start, dur };
 }
 function scheduleGifEstimate() {
   const el = $("sizeEstimate");
-  const { key, start, dur } = gifEstKey();
+  const { key, input, start, dur } = gifEstKey();
   if (gifEstCache.has(key)) { el.textContent = "≈ " + fmtBytes(gifEstCache.get(key)); return; }
   el.textContent = "≈ …";
   clearTimeout(gifEstTimer);
   gifEstTimer = setTimeout(async () => {
     try {
       const bytes = await invoke("estimate_gif", {
-        opts: { input: state.input, resolution: state.resolution, fps: state.fps, gifQuality: state.gifQuality, start, duration: dur },
+        opts: { input, resolution: state.resolution, fps: state.fps, gifQuality: state.gifQuality, start, duration: dur },
       });
       gifEstCache.set(key, bytes);
       // only show if these settings are still current (guard against out-of-order results)
@@ -914,7 +931,7 @@ listen("convert", ({ payload }) => {
       $("doneSub").textContent = sub;
       $("againBtn").textContent = "Convert another";
       // quality check is offered for single video converts only
-      const canVmaf = state.appMode === "convert" && state.mode === "video" && !!state.input;
+      const canVmaf = state.appMode === "convert" && state.mode === "video" && !!state.input && !state.deleteOriginal;
       vmafCtx = canVmaf ? { reference: state.input, distorted: payload.output || state.output, refStart: state.trimEnabled ? state.trimStart : 0 } : null;
       $("vmafResult").classList.add("hidden");
       $("vmafResult").textContent = "";
@@ -1035,7 +1052,11 @@ function setAppMode(mode) {
 }
 // return to the unified landing (clears whatever source was loaded)
 function goLanding() {
+  sourceGeneration++;
   clearTimeout(ytFetchTimer);
+  clearTimeout(thumbTimer);
+  clearTimeout(gifEstTimer);
+  clearTimeout(ytSizeTimer);
   state.input = null; state.info = null;
   state.ytInfo = null; state.ytInfoFailed = false;
   $("ytUrl").value = "";
@@ -1051,22 +1072,26 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 async function loadQueue(paths) {
+  const generation = ++sourceGeneration;
+  const seen = new Set();
+  const unique = paths.filter((p) => {
+    const key = p.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   setAppModeVisuals("convert");
   state.input = null;
   state.info = null;
   state.batch = true;
   document.body.dataset.batch = "on";
-  state.queue = paths.map((p) => ({ path: p, name: splitPath(p).name, status: "queued", info: null, progress: 0 }));
+  state.queue = unique.map((p) => ({ path: p, name: splitPath(p).name, status: "queued", info: null, progress: 0 }));
   setMode("video");
   renderBatchList();
   updateControlsVisibility();
   updateConvertLabel();
   fitWindow(true);
-  // probe all files in parallel - each row fills in as its probe lands
-  await Promise.all(state.queue.map(async (f) => {
-    try { f.info = await invoke("probe", { path: f.path }); } catch (e) { /* keep null */ }
-    renderBatchList();
-  }));
+  await probeQueueFiles(state.queue, generation);
 }
 function batchRowStatusText(f) {
   if (f.status === "active") return Math.round(f.progress || 0) + "%";
@@ -1093,6 +1118,36 @@ function renderBatchList() {
     </div>`;
   }).join("");
 }
+
+const PROBE_CONCURRENCY = 3;
+function refreshBatchRow(file) {
+  const i = state.queue.indexOf(file);
+  if (i < 0) return;
+  const row = $("batchRows").querySelector(`.batch-row[data-i="${i}"]`);
+  if (row) row.querySelector(".br-status").textContent = batchRowStatusText(file);
+}
+
+async function probeQueueFiles(files, generation) {
+  let next = 0;
+  async function worker() {
+    while (generation === sourceGeneration) {
+      const i = next++;
+      if (i >= files.length) return;
+      const file = files[i];
+      try {
+        const info = await invoke("probe", { path: file.path });
+        if (generation !== sourceGeneration) return;
+        file.info = info;
+      } catch (e) {
+        if (generation !== sourceGeneration) return;
+      }
+      refreshBatchRow(file);
+    }
+  }
+  const count = Math.min(PROBE_CONCURRENCY, files.length);
+  await Promise.all(Array.from({ length: count }, () => worker()));
+}
+
 function setRowProgress(i, pct) {
   const f = state.queue[i];
   if (!f) return;
@@ -1171,15 +1226,19 @@ async function runBatch() {
 // append files to the queue (dedupes; safe to call mid-run - the run loop
 // re-checks queue length each iteration, so added files get converted too)
 async function appendToQueue(paths) {
-  const have = new Set(state.queue.map((f) => f.path));
-  const added = paths.filter((p) => !have.has(p)).map((p) => ({ path: p, name: splitPath(p).name, status: "queued", info: null, progress: 0 }));
+  const generation = sourceGeneration;
+  const have = new Set(state.queue.map((f) => f.path.toLowerCase()));
+  const added = [];
+  for (const path of paths) {
+    const key = path.toLowerCase();
+    if (have.has(key)) continue;
+    have.add(key);
+    added.push({ path, name: splitPath(path).name, status: "queued", info: null, progress: 0 });
+  }
   if (!added.length) return;
   state.queue.push(...added);
   renderBatchList(); updateConvertLabel(); fitWindow(true);
-  await Promise.all(added.map(async (f) => {
-    try { f.info = await invoke("probe", { path: f.path }); } catch (e) {}
-    renderBatchList();
-  }));
+  await probeQueueFiles(added, generation);
 }
 $("batchAdd").addEventListener("click", async () => {
   const paths = await invoke("pick_inputs");
@@ -1202,16 +1261,33 @@ $("batchRows").addEventListener("click", (e) => {
 $("uploadPrompt").addEventListener("click", pickFile);
 $("changeFile").addEventListener("click", pickFile);
 
+let dropSettleTimer;
+function settleDroppedPaint() {
+  document.body.classList.add("drop-settle");
+  // Make the visible state synchronous. WebView2 can otherwise pause the
+  // zero-opacity entrance frame while Windows is completing a native drop.
+  void document.body.offsetHeight;
+  clearTimeout(dropSettleTimer);
+  dropSettleTimer = setTimeout(() => {
+    requestAnimationFrame(() => {
+      document.body.classList.remove("drop-settle");
+      void document.body.offsetHeight;
+      fitWindow(false);
+    });
+  }, 140);
+}
+
 // one entry point for incoming files: an active queue (or a running batch)
 // absorbs drops instead of being replaced by them
-function handleIncomingPaths(arr) {
+function handleIncomingPaths(arr, fromNativeDrop = false) {
   if (!arr || !arr.length) return;
+  if (fromNativeDrop) settleDroppedPaint();
   if (state.appMode === "convert" && (state.batch || batchRunning)) { appendToQueue(arr); return; }
   if (arr.length === 1) loadFile(arr[0]);
   else loadQueue(arr);
 }
 listen("dropped", ({ payload }) => {
-  handleIncomingPaths(Array.isArray(payload) ? payload : [payload]);
+  handleIncomingPaths(Array.isArray(payload) ? payload : [payload], true);
 });
 window.addEventListener("dragover", (e) => { e.preventDefault(); document.body.classList.add("drag"); });
 window.addEventListener("dragleave", () => document.body.classList.remove("drag"));
@@ -1452,5 +1528,5 @@ checkFfmpeg();
 // re-check for an ffmpeg update every 6 hours while the app stays open
 setInterval(checkFfmpegUpdate, 6 * 60 * 60 * 1000);
 // check for a new Meowverter version on launch, then every 6 hours
-checkAppUpdate();
+setTimeout(checkAppUpdate, 1200);
 setInterval(checkAppUpdate, 6 * 60 * 60 * 1000);
