@@ -1016,6 +1016,15 @@ fn input_args(o: &ConvertOpts, gpu_decode: bool) -> Vec<String> {
         }
         _ => {}
     }
+    // Tag the output so other tools/AIs can tell the file was optimized by
+    // Meowverter. `comment` survives every container (incl. MP4); the custom
+    // `meowverter` tag additionally survives WebM/MKV/MP3. These are output
+    // options (they sit after -i), so they apply to the converted file.
+    let ver = env!("CARGO_PKG_VERSION");
+    a.push("-metadata".into());
+    a.push(format!("comment=Optimized with Meowverter {ver}"));
+    a.push("-metadata".into());
+    a.push(format!("meowverter={ver}"));
     a
 }
 
@@ -2549,6 +2558,14 @@ mod tests {
         assert!(a.iter().any(|x| x == "-ss"), "trim start -> -ss");
         let t_idx = a.iter().position(|x| x == "-t").expect("trim -> -t");
         assert_eq!(a[t_idx + 1], "3.000", "duration = end - start");
+    }
+
+    #[test]
+    fn output_is_tagged_meowverter() {
+        let o = from_js(r#"{"input":"a.mp4","output":"b.mp4","mode":"video"}"#);
+        let a = input_args(&o, false);
+        assert!(a.iter().any(|x| x.starts_with("comment=Optimized with Meowverter")), "comment tag");
+        assert!(a.iter().any(|x| x.starts_with("meowverter=")), "custom meowverter tag");
     }
 
     #[test]
